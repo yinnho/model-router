@@ -1327,9 +1327,15 @@ impl RequestForwarder {
                 }
             });
             if let Some(key) = api_key {
-                if let Ok(hv) = http::HeaderValue::from_str(&key) {
-                    auth_headers.push((http::HeaderName::from_static("x-api-key"), hv));
+                match http::HeaderValue::from_str(&key) {
+                    Ok(hv) => auth_headers.push((http::HeaderName::from_static("x-api-key"), hv)),
+                    Err(e) => {
+                        log::error!("[Forwarder] API key contains invalid header characters: {e}");
+                        return Err(ProxyError::AuthError("API key contains invalid characters for x-api-key header".to_string()));
+                    }
                 }
+            } else {
+                log::warn!("[Forwarder] Anthropic wire mode but no API key found in Authorization header");
             }
             let anthropic_version: http::HeaderValue =
                 http::HeaderValue::from_static("2023-06-01");
@@ -1726,11 +1732,18 @@ impl RequestForwarder {
             Ok((response, resolved_claude_api_format))
         } else {
             let status_code = status.as_u16();
-            let body_text = String::from_utf8(response.bytes().await?.to_vec()).ok();
+            let body_bytes = response.bytes().await?;
+            let body_text = String::from_utf8_lossy(&body_bytes);
+            let truncated = if body_text.len() > 4096 {
+                log::debug!("Truncating upstream error body from {} to 4096 bytes", body_text.len());
+                body_text[..4096].to_string()
+            } else {
+                body_text.into_owned()
+            };
 
             Err(ProxyError::UpstreamError {
                 status: status_code,
-                body: body_text,
+                body: Some(truncated),
             })
         }
     }
@@ -2138,6 +2151,12 @@ fn rewrite_claude_transform_endpoint(
         // form (`models/gemini-2.5-pro`) that Gemini SDKs emit. See
         // `normalize_gemini_model_id` for rationale.
         let model = super::gemini_url::normalize_gemini_model_id(model);
+
+        // Validate model name to prevent path traversal
+        if model.contains('/') || model.contains('\\') || model.contains("..") {
+            log::warn!("[Forwarder] Rejected suspicious model name: {:?}", model);
+            return (endpoint.to_string(), passthrough_query);
+        }
         let is_stream = body
             .get("stream")
             .and_then(|value| value.as_bool())

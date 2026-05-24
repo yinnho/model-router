@@ -258,50 +258,9 @@ impl ProviderAdapter for CodexAdapter {
     }
 
     fn extract_base_url(&self, provider: &Provider) -> Result<String, ProxyError> {
-        // 1. 尝试直接获取 base_url 字段
-        if let Some(url) = provider
-            .settings_config
-            .get("base_url")
-            .and_then(|v| v.as_str())
-        {
-            return Ok(url.trim_end_matches('/').to_string());
-        }
-
-        // 2. 尝试 baseURL
-        if let Some(url) = provider
-            .settings_config
-            .get("baseURL")
-            .and_then(|v| v.as_str())
-        {
-            return Ok(url.trim_end_matches('/').to_string());
-        }
-
-        // 3. 尝试从 config 对象中获取
-        if let Some(config) = provider.settings_config.get("config") {
-            if let Some(url) = config.get("base_url").and_then(|v| v.as_str()) {
-                return Ok(url.trim_end_matches('/').to_string());
-            }
-
-            // 尝试解析 TOML 字符串格式
-            if let Some(config_str) = config.as_str() {
-                if let Some(start) = config_str.find("base_url = \"") {
-                    let rest = &config_str[start + 12..];
-                    if let Some(end) = rest.find('"') {
-                        return Ok(rest[..end].trim_end_matches('/').to_string());
-                    }
-                }
-                if let Some(start) = config_str.find("base_url = '") {
-                    let rest = &config_str[start + 12..];
-                    if let Some(end) = rest.find('\'') {
-                        return Ok(rest[..end].trim_end_matches('/').to_string());
-                    }
-                }
-            }
-        }
-
-        Err(ProxyError::ConfigError(
-            "Codex Provider 缺少 base_url 配置".to_string(),
-        ))
+        let raw_url = self.resolve_raw_base_url(provider)?;
+        validate_base_url(&raw_url)?;
+        Ok(raw_url)
     }
 
     fn extract_auth(&self, provider: &Provider) -> Option<AuthInfo> {
@@ -357,6 +316,115 @@ impl ProviderAdapter for CodexAdapter {
             auth_header_value(&bearer)?,
         )])
     }
+}
+
+impl CodexAdapter {
+    fn resolve_raw_base_url(&self, provider: &Provider) -> Result<String, ProxyError> {
+        // 1. 尝试直接获取 base_url 字段
+        if let Some(url) = provider
+            .settings_config
+            .get("base_url")
+            .and_then(|v| v.as_str())
+        {
+            return Ok(url.trim_end_matches('/').to_string());
+        }
+
+        // 2. 尝试 baseURL
+        if let Some(url) = provider
+            .settings_config
+            .get("baseURL")
+            .and_then(|v| v.as_str())
+        {
+            return Ok(url.trim_end_matches('/').to_string());
+        }
+
+        // 3. 尝试从 config 对象中获取
+        if let Some(config) = provider.settings_config.get("config") {
+            if let Some(url) = config.get("base_url").and_then(|v| v.as_str()) {
+                return Ok(url.trim_end_matches('/').to_string());
+            }
+
+            // 尝试解析 TOML 字符串格式
+            if let Some(config_str) = config.as_str() {
+                if let Some(start) = config_str.find("base_url = \"") {
+                    let rest = &config_str[start + 12..];
+                    if let Some(end) = rest.find('"') {
+                        return Ok(rest[..end].trim_end_matches('/').to_string());
+                    }
+                }
+                if let Some(start) = config_str.find("base_url = '") {
+                    let rest = &config_str[start + 12..];
+                    if let Some(end) = rest.find('\'') {
+                        return Ok(rest[..end].trim_end_matches('/').to_string());
+                    }
+                }
+            }
+        }
+
+        Err(ProxyError::ConfigError(
+            "Codex Provider 缺少 base_url 配置".to_string(),
+        ))
+    }
+}
+
+/// Validate that a base_url is not an SSRF target (private/internal IP).
+fn validate_base_url(url: &str) -> Result<(), ProxyError> {
+    let parsed = url::Url::parse(url).map_err(|e| {
+        ProxyError::ConfigError(format!("Invalid base_url '{}': {}", url, e))
+    })?;
+
+    // Enforce HTTPS
+    match parsed.scheme() {
+        "https" => {}
+        "http" => {
+            log::warn!("base_url uses insecure HTTP scheme: {}", url);
+        }
+        other => {
+            return Err(ProxyError::ConfigError(format!(
+                "base_url must use http(s) scheme, got '{}'",
+                other
+            )));
+        }
+    }
+
+    // Check host
+    let host = parsed.host_str().ok_or_else(|| {
+        ProxyError::ConfigError(format!("base_url has no host: {}", url))
+    })?;
+
+    // Block obvious internal hostnames
+    if host == "localhost" || host == "127.0.0.1" || host == "::1" {
+        return Err(ProxyError::ConfigError(format!(
+            "base_url points to localhost: {}",
+            url
+        )));
+    }
+
+    // Block private/internal IPs
+    if let Ok(ip) = host.parse::<std::net::IpAddr>() {
+        let is_internal = match ip {
+            std::net::IpAddr::V4(v4) => {
+                v4.is_loopback() || v4.is_private() || v4.is_link_local()
+            }
+            std::net::IpAddr::V6(v6) => {
+                v6.is_loopback() || is_ipv6_private(v6)
+            }
+        };
+        if is_internal {
+            return Err(ProxyError::ConfigError(format!(
+                "base_url points to private/internal IP: {}",
+                url
+            )));
+        }
+    }
+
+    Ok(())
+}
+
+fn is_ipv6_private(ip: std::net::Ipv6Addr) -> bool {
+    // fc00::/7 — unique local addresses (RFC 4193)
+    let octets = ip.octets();
+    (octets[0] & 0xfe) == 0xfc
 }
 
 #[cfg(test)]
@@ -533,5 +601,32 @@ wire_api = "chat"
             &provider,
             "/responses/compact?stream=true"
         ));
+    }
+
+    #[test]
+    fn test_ssrf_rejects_localhost() {
+        let adapter = CodexAdapter::new();
+        let provider = create_provider(json!({
+            "base_url": "http://localhost:8080"
+        }));
+        assert!(adapter.extract_base_url(&provider).is_err());
+    }
+
+    #[test]
+    fn test_ssrf_rejects_private_ip() {
+        let adapter = CodexAdapter::new();
+        let provider = create_provider(json!({
+            "base_url": "https://10.0.0.1/v1"
+        }));
+        assert!(adapter.extract_base_url(&provider).is_err());
+    }
+
+    #[test]
+    fn test_ssrf_allows_public_url() {
+        let adapter = CodexAdapter::new();
+        let provider = create_provider(json!({
+            "base_url": "https://api.deepseek.com/v1"
+        }));
+        assert!(adapter.extract_base_url(&provider).is_ok());
     }
 }

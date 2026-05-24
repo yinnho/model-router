@@ -56,7 +56,7 @@ pub fn responses_to_chat_completions(body: Value) -> Result<Value, ProxyError> {
             let r = item.get("role").and_then(|v| v.as_str()).unwrap_or("");
             if !r.is_empty() { format!("{}:{}", t, r) } else { t.to_string() }
         }).collect();
-        log::warn!("[Codex→Chat] input items: [{}]", summary.join(", "));
+        log::debug!("[Codex→Chat] input items: [{}]", summary.join(", "));
     }
 
     // Fix message ordering for providers like DeepSeek that strictly validate:
@@ -71,7 +71,7 @@ pub fn responses_to_chat_completions(body: Value) -> Result<Value, ProxyError> {
         let has_tcs = msg.get("tool_calls").map_or(false, |v| v.as_array().map_or(false, |a| !a.is_empty()));
         let tc_id = msg.get("tool_call_id").and_then(|v| v.as_str()).unwrap_or("");
         let has_reasoning = msg.get("reasoning_content").is_some();
-        log::warn!("[Codex→Chat] msg[{i}] role={role} has_tool_calls={has_tcs} tool_call_id={tc_id} reasoning={has_reasoning}");
+        log::debug!("[Codex→Chat] msg[{i}] role={role} has_tool_calls={has_tcs} tool_call_id={tc_id} reasoning={has_reasoning}");
     }
 
     result["messages"] = json!(messages);
@@ -225,7 +225,7 @@ impl ConversionState {
             .cloned()
             .collect();
         for id in missing {
-            log::warn!("[Codex→Chat] 补齐缺失tool结果 id={}", &id[..id.len().min(12)]);
+            log::debug!("[Codex→Chat] 补齐缺失tool结果 id={}", &id[..id.len().min(12)]);
             messages.push(json!({
                 "role": "tool",
                 "tool_call_id": id,
@@ -471,7 +471,7 @@ fn fix_chat_message_ordering(messages: &mut Vec<Value>) {
                     }
                 }
                 if !found {
-                    log::warn!("[Codex→Chat] 跳过孤立tool消息 id={}", &call_id[..call_id.len().min(12)]);
+                    log::debug!("[Codex→Chat] 跳过孤立tool消息 id={}", &call_id[..call_id.len().min(12)]);
                     continue;
                 }
             }

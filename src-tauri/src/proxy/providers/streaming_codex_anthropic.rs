@@ -8,6 +8,9 @@ use futures::stream::{Stream, StreamExt};
 use bytes::Bytes;
 use serde_json::{json, Value};
 
+const MAX_OUTPUT_ITEMS: usize = 500;
+const MAX_TEXT_LEN: usize = 1_000_000; // 1MB per text field
+
 /// State machine for converting Anthropic SSE → Responses SSE.
 #[derive(Default)]
 struct AnthropicToResponsesState {
@@ -119,7 +122,9 @@ impl AnthropicToResponsesState {
             return Vec::new();
         };
         if let Some(ref mut item) = self.current_reasoning {
-            item.text.push_str(delta);
+            if item.text.len() + delta.len() <= MAX_TEXT_LEN {
+                item.text.push_str(delta);
+            }
         }
         self.reasoning_chars += delta.len();
         vec![self.emit("response.reasoning_text.delta", json!({
@@ -145,7 +150,11 @@ impl AnthropicToResponsesState {
             events.extend(self.emit("response.output_item.done", json!({
                 "output_index": item.output_index, "item": completed
             })));
-            self.output_items.push(completed);
+            if self.output_items.len() < MAX_OUTPUT_ITEMS {
+                self.output_items.push(completed);
+            } else {
+                log::warn!("output_items exceeded {} limit, dropping item", MAX_OUTPUT_ITEMS);
+            }
             return events;
         }
         Vec::new()
@@ -179,7 +188,9 @@ impl AnthropicToResponsesState {
             return Vec::new();
         };
         if let Some(ref mut item) = self.current_message {
-            item.text.push_str(delta);
+            if item.text.len() + delta.len() <= MAX_TEXT_LEN {
+                item.text.push_str(delta);
+            }
         }
         self.text_chars += delta.len();
         vec![self.emit("response.output_text.delta", json!({
@@ -205,7 +216,11 @@ impl AnthropicToResponsesState {
             events.extend(self.emit("response.output_item.done", json!({
                 "output_index": item.output_index, "item": completed
             })));
-            self.output_items.push(completed);
+            if self.output_items.len() < MAX_OUTPUT_ITEMS {
+                self.output_items.push(completed);
+            } else {
+                log::warn!("output_items exceeded {} limit, dropping item", MAX_OUTPUT_ITEMS);
+            }
             return events;
         }
         Vec::new()
@@ -234,7 +249,9 @@ impl AnthropicToResponsesState {
             return Vec::new();
         };
         if let Some(ref mut tc) = self.current_tool {
-            tc.args.push_str(delta);
+            if tc.args.len() + delta.len() <= MAX_TEXT_LEN {
+                tc.args.push_str(delta);
+            }
         }
         vec![self.emit("response.function_call_arguments.delta", json!({
             "output_index": output_index, "item_id": item_id, "delta": delta
@@ -254,7 +271,11 @@ impl AnthropicToResponsesState {
             events.extend(self.emit("response.output_item.done", json!({
                 "output_index": tc.output_index, "item": completed
             })));
-            self.output_items.push(completed);
+            if self.output_items.len() < MAX_OUTPUT_ITEMS {
+                self.output_items.push(completed);
+            } else {
+                log::warn!("output_items exceeded {} limit, dropping item", MAX_OUTPUT_ITEMS);
+            }
             return events;
         }
         Vec::new()
@@ -421,6 +442,7 @@ pub fn create_responses_sse_stream_from_anthropic<E: std::error::Error + Send + 
             ..Default::default()
         };
         let mut stream_failed = false;
+        const MAX_BUFFER_SIZE: usize = 50 * 1024 * 1024; // 50 MB
 
         tokio::pin!(stream);
 
@@ -428,6 +450,13 @@ pub fn create_responses_sse_stream_from_anthropic<E: std::error::Error + Send + 
             match chunk {
                 Ok(bytes) => {
                     crate::proxy::sse::append_utf8_safe(&mut buffer, &mut utf8_remainder, &bytes);
+
+                    if buffer.len() > MAX_BUFFER_SIZE {
+                        log::error!("[Anthropic→Responses] SSE buffer exceeded {} bytes, aborting", MAX_BUFFER_SIZE);
+                        yield Ok(state.failed_event("SSE buffer overflow".to_string(), Some("buffer_overflow".to_string())));
+                        stream_failed = true;
+                        break;
+                    }
 
                     while let Some(block) = crate::proxy::sse::take_sse_block(&mut buffer) {
                         if block.trim().is_empty() {

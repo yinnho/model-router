@@ -57,13 +57,19 @@ pub fn responses_to_anthropic_messages(body: Value) -> Result<Value, ProxyError>
         .and_then(|v| v.as_str())
         != Some("disabled");
     if thinking_enabled {
+        let budget_tokens = body
+            .get("thinking")
+            .and_then(|t| t.get("budget_tokens"))
+            .and_then(|v| v.as_u64())
+            .unwrap_or(10000);
         result["thinking"] = json!({
             "type": "enabled",
-            "budget_tokens": 10000
+            "budget_tokens": budget_tokens
         });
         // Anthropic requires max_tokens >= budget_tokens when thinking is enabled
-        if max_tokens < 16000 {
-            result["max_tokens"] = json!(16000);
+        let min_max_tokens = (budget_tokens + 6000) as u64;
+        if max_tokens < min_max_tokens {
+            result["max_tokens"] = json!(min_max_tokens);
         }
     }
 
@@ -262,7 +268,8 @@ fn append_responses_input_as_anthropic_messages(
                             }
                             _ => {
                                 if !text.is_empty() {
-                                    messages.push(json!({"role": role, "content": text}));
+                                    log::debug!("Mapping unknown role '{}' to 'user' for Anthropic API", role);
+                                    messages.push(json!({"role": "user", "content": text}));
                                 }
                             }
                         }
@@ -419,7 +426,7 @@ fn fix_anthropic_message_ordering(messages: &mut Vec<Value>) {
         fixed.push(msg);
     }
 
-    // Ensure not ending with assistant
+    // Ensure not ending with assistant — Anthropic requires user/tool_result after assistant
     while fixed.last().map_or(false, |m| m.get("role").and_then(|v| v.as_str()) == Some("assistant")) {
         let last = fixed.last().unwrap();
         let has_tool_use = last.get("content")
@@ -439,7 +446,8 @@ fn fix_anthropic_message_ordering(messages: &mut Vec<Value>) {
                 .collect();
             fixed.push(json!({"role": "user", "content": results}));
         } else {
-            fixed.pop();
+            // Add a minimal user message instead of dropping the assistant message
+            fixed.push(json!({"role": "user", "content": " "}));
         }
     }
 

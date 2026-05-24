@@ -380,7 +380,7 @@ async fn handle_claude_transform(
         responses_sse_to_response_value(&body_str)?
     } else {
         serde_json::from_slice(&body_bytes).map_err(|e| {
-            log::error!("[Claude] 解析上游响应失败: {e}, body: {body_str}");
+            log::error!("[Claude] 解析上游响应失败: {e}, body: {}...", &body_str[..body_str.len().min(1024)]);
             ProxyError::TransformError(format!("Failed to parse upstream response: {e}"))
         })?
     };
@@ -845,7 +845,7 @@ async fn handle_codex_chat_to_responses_transform(
         read_decoded_body(response, ctx.tag, body_timeout).await?;
     let body_str = String::from_utf8_lossy(&body_bytes);
     let chat_response: Value = serde_json::from_slice(&body_bytes).map_err(|e| {
-        log::error!("[Codex] 解析 Chat 上游响应失败: {e}, body: {body_str}");
+        log::error!("[Codex] 解析 Chat 上游响应失败: {e}, body: {}...", &body_str[..body_str.len().min(1024)]);
         ProxyError::TransformError(format!("Failed to parse upstream chat response: {e}"))
     })?;
     let responses_response = transform_codex_chat::chat_completion_to_response(chat_response)
@@ -1005,7 +1005,7 @@ async fn handle_codex_anthropic_to_responses_transform(
         read_decoded_body(response, ctx.tag, body_timeout).await?;
     let body_str = String::from_utf8_lossy(&body_bytes);
     let anthropic_response: Value = serde_json::from_slice(&body_bytes).map_err(|e| {
-        log::error!("[Codex/Anthropic] 解析 Anthropic 上游响应失败: {e}, body: {body_str}");
+        log::error!("[Codex/Anthropic] 解析 Anthropic 上游响应失败: {e}, body: {}...", &body_str[..body_str.len().min(1024)]);
         ProxyError::TransformError(format!("Failed to parse upstream anthropic response: {e}"))
     })?;
     let responses_response = transform_codex_anthropic::anthropic_messages_to_response(anthropic_response)

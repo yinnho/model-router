@@ -10,6 +10,9 @@ use futures::stream::{Stream, StreamExt};
 use serde_json::{json, Value};
 use std::collections::BTreeMap;
 
+const MAX_OUTPUT_ITEMS: usize = 500;
+const MAX_TEXT_LEN: usize = 1_000_000; // 1MB per text field
+
 #[derive(Debug, Default)]
 struct TextItemState {
     output_index: Option<u32>,
@@ -155,7 +158,9 @@ impl ChatToResponsesState {
                 events
             }
             InlineThinkMode::Detecting => {
-                self.inline_think.buffer.push_str(delta);
+                if self.inline_think.buffer.len() < MAX_TEXT_LEN {
+                    self.inline_think.buffer.push_str(delta);
+                }
                 match leading_think_prefix_decision(&self.inline_think.buffer) {
                     ThinkPrefixDecision::NeedMore => Vec::new(),
                     ThinkPrefixDecision::Reasoning => {
@@ -172,7 +177,9 @@ impl ChatToResponsesState {
                 }
             }
             InlineThinkMode::Reasoning => {
-                self.inline_think.buffer.push_str(delta);
+                if self.inline_think.buffer.len() < MAX_TEXT_LEN {
+                    self.inline_think.buffer.push_str(delta);
+                }
                 self.drain_complete_inline_think()
             }
         }
@@ -303,6 +310,12 @@ impl ChatToResponsesState {
             ));
         }
 
+        if self.reasoning.text.len() + delta.len() > MAX_TEXT_LEN {
+            log::warn!("reasoning text exceeded {} bytes, truncating", MAX_TEXT_LEN);
+            let remaining = MAX_TEXT_LEN.saturating_sub(self.reasoning.text.len());
+            self.reasoning.text.push_str(&delta[..remaining]);
+            return events;
+        }
         self.reasoning.text.push_str(delta);
         let output_index = self.reasoning.output_index.unwrap_or(0);
         events.push(sse_event(
@@ -359,6 +372,12 @@ impl ChatToResponsesState {
             ));
         }
 
+        if self.text.text.len() + delta.len() > MAX_TEXT_LEN {
+            log::warn!("text exceeded {} bytes, truncating", MAX_TEXT_LEN);
+            let remaining = MAX_TEXT_LEN.saturating_sub(self.text.text.len());
+            self.text.text.push_str(&delta[..remaining]);
+            return events;
+        }
         self.text.text.push_str(delta);
         let output_index = self.text.output_index.unwrap_or(0);
         events.push(sse_event(
@@ -405,7 +424,7 @@ impl ChatToResponsesState {
             if let Some(name) = name_delta {
                 state.name = name;
             }
-            if !args_delta.is_empty() {
+            if !args_delta.is_empty() && state.arguments.len() < MAX_TEXT_LEN {
                 state.arguments.push_str(&args_delta);
             }
 
@@ -522,7 +541,11 @@ impl ChatToResponsesState {
                 "text": text
             }]
         });
-        self.output_items.push((output_index, item.clone()));
+        if self.output_items.len() < MAX_OUTPUT_ITEMS {
+            self.output_items.push((output_index, item.clone()));
+        } else {
+            log::warn!("output_items exceeded {} limit, dropping item", MAX_OUTPUT_ITEMS);
+        }
         self.reasoning.done = true;
 
         vec![
@@ -577,7 +600,11 @@ impl ChatToResponsesState {
                 "annotations": []
             }]
         });
-        self.output_items.push((output_index, item.clone()));
+        if self.output_items.len() < MAX_OUTPUT_ITEMS {
+            self.output_items.push((output_index, item.clone()));
+        } else {
+            log::warn!("output_items exceeded {} limit, dropping item", MAX_OUTPUT_ITEMS);
+        }
         self.text.done = true;
 
         vec![
@@ -675,7 +702,11 @@ impl ChatToResponsesState {
                 "arguments": state.arguments
             });
             state.done = true;
-            self.output_items.push((output_index, item.clone()));
+            if self.output_items.len() < MAX_OUTPUT_ITEMS {
+                self.output_items.push((output_index, item.clone()));
+            } else {
+                log::warn!("output_items exceeded {} limit, dropping item", MAX_OUTPUT_ITEMS);
+            }
 
             events.push(sse_event(
                 "response.function_call_arguments.done",
@@ -805,6 +836,7 @@ pub fn create_responses_sse_stream_from_chat<E: std::error::Error + Send + 'stat
         let mut utf8_remainder: Vec<u8> = Vec::new();
         let mut state = ChatToResponsesState::default();
         let mut stream_failed = false;
+        const MAX_BUFFER_SIZE: usize = 50 * 1024 * 1024; // 50 MB
 
         tokio::pin!(stream);
 
@@ -812,6 +844,13 @@ pub fn create_responses_sse_stream_from_chat<E: std::error::Error + Send + 'stat
             match chunk {
                 Ok(bytes) => {
                     crate::proxy::sse::append_utf8_safe(&mut buffer, &mut utf8_remainder, &bytes);
+
+                    if buffer.len() > MAX_BUFFER_SIZE {
+                        log::error!("[Chat→Responses] SSE buffer exceeded {} bytes, aborting", MAX_BUFFER_SIZE);
+                        yield Ok(state.failed_event("SSE buffer overflow".to_string(), Some("buffer_overflow".to_string())));
+                        stream_failed = true;
+                        break;
+                    }
 
                     while let Some(block) = take_sse_block(&mut buffer) {
                         if block.trim().is_empty() {
