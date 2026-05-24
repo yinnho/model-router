@@ -13,7 +13,7 @@ use crate::error::AppError;
 /// - `dirs::home_dir()` 在 Windows 上使用 `SHGetKnownFolderPath(FOLDERID_Profile)`，
 ///   返回的是真实用户目录（类似 `C:\\Users\\Alice`），与 v3.10.2 行为一致。
 /// - 不要直接使用 `HOME` 环境变量：它可能由 Git/Cygwin/MSYS 等第三方工具注入，
-///   且不一定等于用户目录，可能导致 `.cc-switch/cc-switch.db` 路径变化，从而“看起来像数据丢失”。
+///   且不一定等于用户目录，可能导致 `.model-router/model-router.db` 路径变化，从而"看起来像数据丢失"。
 ///
 /// ## 测试隔离
 ///
@@ -86,40 +86,54 @@ pub fn get_claude_settings_path() -> PathBuf {
     settings
 }
 
-/// 获取应用配置目录路径 (~/.cc-switch)
+/// 获取应用配置目录路径 (~/.model-router)
 pub fn get_app_config_dir() -> PathBuf {
     if let Some(custom) = crate::app_store::get_app_config_dir_override() {
         return custom;
     }
 
-    let default_dir = get_home_dir().join(".cc-switch");
+    let default_dir = get_home_dir().join(".model-router");
 
-    // 兼容 v3.10.3：当用户环境存在 `HOME` 且与真实用户目录不同，
-    // v3.10.3 可能在 `HOME/.cc-switch/` 下创建/使用了数据库。
-    // 这里仅在“默认位置没有数据库”时回退到旧位置，避免再次出现“供应商消失”问题，
-    // 同时也避免新安装因为 `HOME` 被设置而写入非预期路径。
-    #[cfg(windows)]
-    {
-        let default_db = default_dir.join("cc-switch.db");
-        if !default_db.exists() {
-            if let Ok(home_env) = std::env::var("HOME") {
-                let trimmed = home_env.trim();
-                if !trimmed.is_empty() {
-                    let legacy_dir = PathBuf::from(trimmed).join(".cc-switch");
-                    if legacy_dir.join("cc-switch.db").exists() {
-                        log::info!(
-                            "Detected v3.10.3 legacy database at {}, using it instead of {}",
-                            legacy_dir.display(),
-                            default_dir.display()
-                        );
-                        return legacy_dir;
-                    }
+    // 自动迁移：如果新目录不存在但旧 ~/.cc-switch 目录存在，自动迁移
+    if !default_dir.exists() {
+        let legacy_dir = get_home_dir().join(".cc-switch");
+        if legacy_dir.exists() {
+            log::info!(
+                "Migrating data from {} to {}",
+                legacy_dir.display(),
+                default_dir.display()
+            );
+            if std::fs::rename(&legacy_dir, &default_dir).is_ok() {
+                log::info!("Migration successful");
+            } else {
+                // rename 失败（跨分区等），尝试 copy + remove
+                if let Err(e) = copy_dir_recursive(&legacy_dir, &default_dir) {
+                    log::error!("Migration failed: {}", e);
+                    // 回退到旧目录
+                    return legacy_dir;
                 }
+                log::info!("Migration via copy successful");
             }
+            return default_dir;
         }
     }
 
     default_dir
+}
+
+fn copy_dir_recursive(src: &std::path::Path, dst: &std::path::Path) -> std::io::Result<()> {
+    std::fs::create_dir_all(dst)?;
+    for entry in std::fs::read_dir(src)? {
+        let entry = entry?;
+        let src_path = entry.path();
+        let dst_path = dst.join(entry.file_name());
+        if src_path.is_dir() {
+            copy_dir_recursive(&src_path, &dst_path)?;
+        } else {
+            std::fs::copy(&src_path, &dst_path)?;
+        }
+    }
+    Ok(())
 }
 
 /// 获取应用配置文件路径

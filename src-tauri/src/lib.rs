@@ -200,7 +200,7 @@ fn macos_tray_icon() -> Option<Image<'static>> {
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
-    // 设置 panic hook，在应用崩溃时记录日志到 <app_config_dir>/crash.log（默认 ~/.cc-switch/crash.log）
+    // 设置 panic hook，在应用崩溃时记录日志到 <app_config_dir>/crash.log（默认 ~/.model-router/crash.log）
     panic_hook::setup_panic_hook();
 
     let mut builder = tauri::Builder::default();
@@ -298,7 +298,7 @@ pub fn run() {
                     log::warn!("初始化 Updater 插件失败，已跳过：{e}");
                 }
             }
-            // 初始化日志（单文件输出到 <app_config_dir>/logs/cc-switch.log）
+            // 初始化日志（单文件输出到 <app_config_dir>/logs/model-router.log）
             {
                 use tauri_plugin_log::{RotationStrategy, Target, TargetKind, TimezoneStrategy};
 
@@ -310,7 +310,7 @@ pub fn run() {
                 }
 
                 // 启动时删除旧日志文件，实现单文件覆盖效果
-                let log_file_path = log_dir.join("cc-switch.log");
+                let log_file_path = log_dir.join("model-router.log");
                 let _ = std::fs::remove_file(&log_file_path);
 
                 app.handle().plugin(
@@ -321,7 +321,7 @@ pub fn run() {
                             Target::new(TargetKind::Stdout),
                             Target::new(TargetKind::Folder {
                                 path: log_dir,
-                                file_name: Some("cc-switch".into()),
+                                file_name: Some("model-router".into()),
                             }),
                         ])
                         // 单文件模式：启动时删除旧文件，达到大小时轮转
@@ -337,7 +337,22 @@ pub fn run() {
 
             // 初始化数据库
             let app_config_dir = crate::config::get_app_config_dir();
-            let db_path = app_config_dir.join("cc-switch.db");
+            let db_path = app_config_dir.join("model-router.db");
+
+            // 自动迁移：cc-switch.db → model-router.db
+            if !db_path.exists() {
+                let legacy_db = app_config_dir.join("cc-switch.db");
+                if legacy_db.exists() {
+                    log::info!("Migrating database from cc-switch.db to model-router.db");
+                    if let Err(e) = std::fs::rename(&legacy_db, &db_path) {
+                        log::error!("Failed to rename database: {}, copying instead", e);
+                        if let Err(e) = std::fs::copy(&legacy_db, &db_path) {
+                            log::error!("Failed to copy database: {}", e);
+                        }
+                    }
+                }
+            }
+
             let json_path = app_config_dir.join("config.json");
 
             // 检查是否需要从 config.json 迁移到 SQLite
@@ -1733,7 +1748,7 @@ fn show_database_init_error_dialog(
             您的数据尚未丢失，应用不会自动删除数据库文件。\n\
             常见原因包括：数据库版本过新、文件损坏、权限不足、磁盘空间不足等。\n\n\
             建议：\n\
-            1) 先备份整个配置目录（包含 cc-switch.db）\n\
+            1) 先备份整个配置目录（包含 model-router.db）\n\
             2) 如果提示“数据库版本过新”，请升级到更新版本\n\
             3) 如果刚升级出现异常，可回退旧版本导出/备份后再升级\n\n\
             点击「重试」重新尝试初始化\n\
@@ -1747,7 +1762,7 @@ fn show_database_init_error_dialog(
             Your data is NOT lost - the app will not delete the database automatically.\n\
             Common causes include: newer database version, corrupted file, permission issues, or low disk space.\n\n\
             Suggestions:\n\
-            1) Back up the entire config directory (including cc-switch.db)\n\
+            1) Back up the entire config directory (including model-router.db)\n\
             2) If you see “database version is newer”, please upgrade Model Router\n\
             3) If this happened right after upgrading, consider rolling back to export/backup then upgrade again\n\n\
             Click 'Retry' to attempt initialization again\n\

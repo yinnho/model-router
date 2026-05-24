@@ -18,5 +18,5 @@ fn main() {
         }
     }
 
-    cc_switch_lib::run();
+    model_router_lib::run();
 }
