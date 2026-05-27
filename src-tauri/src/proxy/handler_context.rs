@@ -7,8 +7,10 @@ use crate::provider::Provider;
 use crate::proxy::{
     extract_session_id,
     forwarder::RequestForwarder,
+    provider_tier,
+    request_classifier,
     server::ProxyState,
-    types::{AppProxyConfig, CopilotOptimizerConfig, OptimizerConfig, RectifierConfig},
+    types::{AppProxyConfig, CopilotOptimizerConfig, OptimizerConfig, RectifierConfig, RouterConfig},
     ProxyError,
 };
 use axum::http::HeaderMap;
@@ -126,7 +128,7 @@ impl RequestContext {
 
         // 使用共享的 ProviderRouter 选择 Provider（熔断器状态跨请求保持）
         // 注意：只在这里调用一次，结果传递给 forwarder，避免重复消耗 HalfOpen 名额
-        let providers = state
+        let mut providers = state
             .provider_router
             .select_providers(app_type_str)
             .await
@@ -137,6 +139,18 @@ impl RequestContext {
                 crate::error::AppError::NoProvidersConfigured => ProxyError::NoProvidersConfigured,
                 _ => ProxyError::DatabaseError(e.to_string()),
             })?;
+
+        // 路由决策：根据 RouterConfig 重排 provider 列表
+        let router_config = state.db.get_router_config().unwrap_or_default();
+        if router_config.is_routing_enabled() && providers.len() > 1 {
+            providers = apply_routing(
+                providers,
+                &router_config,
+                body,
+                &state,
+                &session_id,
+            ).await;
+        }
 
         let provider = providers
             .first()
@@ -270,6 +284,40 @@ impl RequestContext {
                 idle_timeout: 0,
             }
         }
+    }
+}
+
+/// Apply routing logic to reorder providers based on RouterConfig
+async fn apply_routing(
+    providers: Vec<Provider>,
+    config: &RouterConfig,
+    body: &serde_json::Value,
+    state: &ProxyState,
+    session_id: &str,
+) -> Vec<Provider> {
+    if let Some(target) = config.fixed_tier() {
+        let result = provider_tier::reorder_for_fixed_target(providers, target);
+        log::debug!("[Router] Fixed mode: target={}, provider={}", target, result[0].id);
+        result
+    } else if config.is_auto_mode() {
+        let primary = &providers[0];
+        let complexity = request_classifier::classify_request(
+            body,
+            primary,
+            &config.classifier_model,
+            &state.classification_cache,
+            session_id,
+        )
+        .await;
+        let result = provider_tier::reorder_for_tier(providers, complexity);
+        log::info!(
+            "[Router] Auto mode: complexity={}, provider={}",
+            complexity,
+            result[0].id
+        );
+        result
+    } else {
+        providers
     }
 }
 

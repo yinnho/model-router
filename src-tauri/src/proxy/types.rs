@@ -329,6 +329,59 @@ impl Default for CopilotOptimizerConfig {
     }
 }
 
+/// 路由配置
+///
+/// 存储在 settings 表中，key = "router_config"
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RouterConfig {
+    /// 路由模式: "off" | "fixed:opus" | "fixed:gpt55" | "auto"
+    #[serde(default)]
+    pub mode: String,
+    /// auto 模式分类器使用的模型
+    #[serde(default = "default_classifier_model")]
+    pub classifier_model: String,
+    /// 分类结果缓存 TTL（秒）
+    #[serde(default = "default_cache_ttl_seconds")]
+    pub cache_ttl_seconds: u64,
+}
+
+fn default_classifier_model() -> String {
+    "claude-haiku-4-5".to_string()
+}
+
+fn default_cache_ttl_seconds() -> u64 {
+    300
+}
+
+impl Default for RouterConfig {
+    fn default() -> Self {
+        Self {
+            mode: "off".to_string(),
+            classifier_model: default_classifier_model(),
+            cache_ttl_seconds: default_cache_ttl_seconds(),
+        }
+    }
+}
+
+impl RouterConfig {
+    pub fn is_routing_enabled(&self) -> bool {
+        self.mode != "off"
+    }
+
+    pub fn is_auto_mode(&self) -> bool {
+        self.mode == "auto"
+    }
+
+    pub fn fixed_tier(&self) -> Option<&str> {
+        if self.mode.starts_with("fixed:") {
+            Some(&self.mode[6..])
+        } else {
+            None
+        }
+    }
+}
+
 /// 日志配置
 ///
 /// 存储在 settings 表的 log_config 字段中（JSON 格式）

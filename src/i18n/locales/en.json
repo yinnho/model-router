@@ -2629,5 +2629,13 @@
     "expiredHint": "Run the {{tool}} command to refresh your login",
     "queryFailed": "Query failed",
     "refresh": "Refresh"
+  },
+  "router": {
+    "mode": {
+      "off": "Off",
+      "opus": "Opus",
+      "gpt": "GPT",
+      "auto": "Auto"
+    }
   }
 }

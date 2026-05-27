@@ -817,6 +817,7 @@ mod tests {
     use crate::error::AppError;
     use crate::provider::ProviderMeta;
     use crate::proxy::failover_switch::FailoverSwitchManager;
+    use crate::proxy::request_classifier::ClassificationCache;
     use crate::proxy::provider_router::ProviderRouter;
     use crate::proxy::providers::gemini_shadow::GeminiShadowStore;
     use crate::proxy::types::{ProxyConfig, ProxyStatus};
@@ -942,6 +943,7 @@ mod tests {
             gemini_shadow: Arc::new(GeminiShadowStore::default()),
             app_handle: None,
             failover_manager: Arc::new(FailoverSwitchManager::new(db)),
+            classification_cache: Arc::new(ClassificationCache::new(std::time::Duration::from_secs(300))),
         }
     }
 

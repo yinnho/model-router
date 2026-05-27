@@ -138,3 +138,13 @@ export interface AppProxyConfig {
   circuitErrorRateThreshold: number;
   circuitMinRequests: number;
 }
+
+/** 路由模式 */
+export type RoutingMode = "off" | "fixed:opus" | "fixed:gpt55" | "auto";
+
+/** 路由配置 */
+export interface RouterConfig {
+  mode: RoutingMode;
+  classifierModel: string;
+  cacheTtlSeconds: number;
+}

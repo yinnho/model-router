@@ -446,3 +446,26 @@ pub async fn get_circuit_breaker_stats(
     let _ = (state, provider_id, app_type);
     Ok(None)
 }
+
+/// 获取路由配置
+#[tauri::command]
+pub async fn get_router_config(
+    state: tauri::State<'_, AppState>,
+) -> Result<RouterConfig, String> {
+    state
+        .db
+        .get_router_config()
+        .map_err(|e| e.to_string())
+}
+
+/// 更新路由配置
+#[tauri::command]
+pub async fn update_router_config(
+    state: tauri::State<'_, AppState>,
+    config: RouterConfig,
+) -> Result<(), String> {
+    state
+        .db
+        .set_router_config(&config)
+        .map_err(|e| e.to_string())
+}

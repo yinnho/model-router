@@ -307,6 +307,27 @@ impl Database {
         self.set_setting("copilot_optimizer_config", &json)
     }
 
+    // --- 路由配置 ---
+
+    /// 获取路由配置
+    pub fn get_router_config(&self) -> Result<crate::proxy::types::RouterConfig, AppError> {
+        match self.get_setting("router_config")? {
+            Some(json) => serde_json::from_str(&json)
+                .map_err(|e| AppError::Database(format!("解析路由配置失败: {e}"))),
+            None => Ok(crate::proxy::types::RouterConfig::default()),
+        }
+    }
+
+    /// 更新路由配置
+    pub fn set_router_config(
+        &self,
+        config: &crate::proxy::types::RouterConfig,
+    ) -> Result<(), AppError> {
+        let json = serde_json::to_string(config)
+            .map_err(|e| AppError::Database(format!("序列化路由配置失败: {e}")))?;
+        self.set_setting("router_config", &json)
+    }
+
     // --- 日志配置 ---
 
     /// 获取日志配置

@@ -10,8 +10,8 @@
 
 use super::{
     failover_switch::FailoverSwitchManager, handlers, log_codes::srv as log_srv,
-    provider_router::ProviderRouter, providers::gemini_shadow::GeminiShadowStore, types::*,
-    ProxyError,
+    provider_router::ProviderRouter, providers::gemini_shadow::GeminiShadowStore,
+    request_classifier::ClassificationCache, types::*, ProxyError,
 };
 use crate::database::Database;
 use axum::{
@@ -42,6 +42,8 @@ pub struct ProxyState {
     pub app_handle: Option<tauri::AppHandle>,
     /// 故障转移切换管理器
     pub failover_manager: Arc<FailoverSwitchManager>,
+    /// 请求分类缓存（auto 路由模式）
+    pub classification_cache: Arc<ClassificationCache>,
 }
 
 /// 代理HTTP服务器
@@ -74,6 +76,9 @@ impl ProxyServer {
             gemini_shadow: Arc::new(GeminiShadowStore::default()),
             app_handle,
             failover_manager,
+            classification_cache: Arc::new(ClassificationCache::new(
+                std::time::Duration::from_secs(300),
+            )),
         };
 
         Self {
@@ -212,6 +217,9 @@ impl ProxyServer {
     }
 
     pub async fn stop(&self) -> Result<(), ProxyError> {
+        // 0. 清理分类缓存
+        self.state.classification_cache.clear();
+
         // 1. 发送关闭信号
         if let Some(tx) = self.shutdown_tx.write().await.take() {
             let _ = tx.send(());
