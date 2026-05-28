@@ -2636,6 +2636,7 @@
       "opus": "Opus",
       "gpt": "GPT",
       "auto": "自动"
-    }
+    },
+    "noProvider": "当前路由模式没有匹配的供应商"
   }
 }

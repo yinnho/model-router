@@ -351,6 +351,12 @@ pub struct ProviderMeta {
     /// 用于多账号支持，关联到特定的 GitHub 账号
     #[serde(rename = "githubAccountId", skip_serializing_if = "Option::is_none")]
     pub github_account_id: Option<String>,
+    /// 路由层级标注（用于请求路由）
+    /// - "light": 快速/便宜模型
+    /// - "medium": 平衡模型
+    /// - "heavy": 最强模型
+    #[serde(rename = "routingTier", skip_serializing_if = "Option::is_none")]
+    pub routing_tier: Option<String>,
 }
 
 impl ProviderMeta {

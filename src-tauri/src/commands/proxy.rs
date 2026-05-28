@@ -469,3 +469,54 @@ pub async fn update_router_config(
         .set_router_config(&config)
         .map_err(|e| e.to_string())
 }
+
+/// 检查当前路由模式是否有匹配的 provider
+#[tauri::command]
+pub async fn check_router_status(
+    state: tauri::State<'_, AppState>,
+    app_type: String,
+) -> Result<RouterStatus, String> {
+    let config = state.db.get_router_config().map_err(|e| e.to_string())?;
+    if !config.is_routing_enabled() {
+        return Ok(RouterStatus {
+            mode: config.mode,
+            has_matching_provider: true,
+            matching_provider_name: None,
+        });
+    }
+
+    let all_providers: Vec<crate::provider::Provider> = state
+        .db
+        .get_all_providers(&app_type)
+        .map_err(|e| e.to_string())?
+        .into_values()
+        .collect();
+
+    let (idx, name) = if let Some(target) = config.fixed_tier() {
+        match crate::proxy::provider_tier::resolve_fixed_target(&all_providers, target) {
+            Some(i) => (true, Some(all_providers[i].name.clone())),
+            None => (false, None),
+        }
+    } else if config.is_auto_mode() {
+        // Auto mode needs at least heavy and light providers
+        let has_heavy =
+            crate::proxy::provider_tier::resolve_tier_provider(&all_providers, crate::proxy::request_classifier::Complexity::Heavy).is_some();
+        let has_light =
+            crate::proxy::provider_tier::resolve_tier_provider(&all_providers, crate::proxy::request_classifier::Complexity::Light).is_some();
+        let has_medium =
+            crate::proxy::provider_tier::resolve_tier_provider(&all_providers, crate::proxy::request_classifier::Complexity::Medium).is_some();
+        if has_heavy || has_light || has_medium {
+            (true, None)
+        } else {
+            (false, None)
+        }
+    } else {
+        (true, None)
+    };
+
+    Ok(RouterStatus {
+        mode: config.mode,
+        has_matching_provider: idx,
+        matching_provider_name: name,
+    })
+}

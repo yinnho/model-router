@@ -382,6 +382,18 @@ impl RouterConfig {
     }
 }
 
+/// 路由状态（前端查询用）
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RouterStatus {
+    /// 当前路由模式
+    pub mode: String,
+    /// 是否有匹配的 provider
+    pub has_matching_provider: bool,
+    /// 匹配的 provider 名称（fixed 模式下有值）
+    pub matching_provider_name: Option<String>,
+}
+
 /// 日志配置
 ///
 /// 存储在 settings 表的 log_config 字段中（JSON 格式）

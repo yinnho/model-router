@@ -1098,6 +1098,7 @@ pub fn run() {
             commands::set_copilot_optimizer_config,
             commands::get_router_config,
             commands::update_router_config,
+            commands::check_router_status,
             commands::get_log_config,
             commands::set_log_config,
             commands::restart_app,

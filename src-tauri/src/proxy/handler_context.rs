@@ -140,15 +140,16 @@ impl RequestContext {
                 _ => ProxyError::DatabaseError(e.to_string()),
             })?;
 
-        // 路由决策：根据 RouterConfig 重排 provider 列表
+        // 路由决策：根据 RouterConfig 选择目标 provider
         let router_config = state.db.get_router_config().unwrap_or_default();
-        if router_config.is_routing_enabled() && providers.len() > 1 {
+        if router_config.is_routing_enabled() {
             providers = apply_routing(
                 providers,
                 &router_config,
                 body,
                 &state,
                 &session_id,
+                app_type_str,
             ).await;
         }
 
@@ -287,29 +288,47 @@ impl RequestContext {
     }
 }
 
-/// Apply routing logic to reorder providers based on RouterConfig
+/// Apply routing logic to select target provider based on RouterConfig
+///
+/// Reads ALL providers from DB (not just failover queue), finds the one matching
+/// the target tier, and places it first. The original failover chain follows.
 async fn apply_routing(
-    providers: Vec<Provider>,
+    failover_providers: Vec<Provider>,
     config: &RouterConfig,
     body: &serde_json::Value,
     state: &ProxyState,
     session_id: &str,
+    app_type_str: &str,
 ) -> Vec<Provider> {
+    // Read all providers from DB for routing resolution
+    let all_providers: Vec<Provider> = match state.db.get_all_providers(app_type_str) {
+        Ok(map) => map.into_values().collect(),
+        Err(e) => {
+            log::warn!("[Router] Failed to read providers from DB: {e}, using failover list");
+            return failover_providers;
+        }
+    };
+
+    if all_providers.is_empty() {
+        return failover_providers;
+    }
+
     if let Some(target) = config.fixed_tier() {
-        let result = provider_tier::reorder_for_fixed_target(providers, target);
+        let result = provider_tier::build_routed_list_for_fixed(all_providers, target);
         log::debug!("[Router] Fixed mode: target={}, provider={}", target, result[0].id);
         result
     } else if config.is_auto_mode() {
-        let primary = &providers[0];
+        // Classifier needs a provider to call — use the first from failover list
+        let classifier_provider = failover_providers.first().unwrap_or(&all_providers[0]);
         let complexity = request_classifier::classify_request(
             body,
-            primary,
+            classifier_provider,
             &config.classifier_model,
             &state.classification_cache,
             session_id,
         )
         .await;
-        let result = provider_tier::reorder_for_tier(providers, complexity);
+        let result = provider_tier::build_routed_list(all_providers, complexity);
         log::info!(
             "[Router] Auto mode: complexity={}, provider={}",
             complexity,
@@ -317,7 +336,7 @@ async fn apply_routing(
         );
         result
     } else {
-        providers
+        failover_providers
     }
 }
 

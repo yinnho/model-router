@@ -1293,7 +1293,7 @@ function App() {
                     )}
                   {activeApp !== "claude-desktop" &&
                     settingsData?.enableLocalProxy && (
-                      <RoutingModeSelector />
+                      <RoutingModeSelector activeApp={activeApp} />
                     )}
                 </div>
               )}

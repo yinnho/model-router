@@ -3,12 +3,23 @@ import { routerApi } from "@/lib/api/router";
 import type { RouterConfig, RoutingMode } from "@/types/proxy";
 
 const ROUTER_CONFIG_KEY = ["routerConfig"] as const;
+const ROUTER_STATUS_KEY = (appType: string) =>
+  ["routerStatus", appType] as const;
 
 export function useRouterConfig() {
   return useQuery({
     queryKey: ROUTER_CONFIG_KEY,
     queryFn: () => routerApi.getConfig(),
     staleTime: 30_000,
+  });
+}
+
+export function useRouterStatus(appType: string) {
+  return useQuery({
+    queryKey: ROUTER_STATUS_KEY(appType),
+    queryFn: () => routerApi.checkStatus(appType),
+    staleTime: 10_000,
+    enabled: !!appType,
   });
 }
 
@@ -31,6 +42,7 @@ export function useUpdateRouterConfig() {
     onSettled: () => {
       queryClient.invalidateQueries({ queryKey: ROUTER_CONFIG_KEY });
       queryClient.invalidateQueries({ queryKey: ["proxyStatus"] });
+      queryClient.invalidateQueries({ queryKey: ["routerStatus"] });
     },
   });
 }
@@ -67,6 +79,7 @@ export function useSetRoutingMode() {
     onSettled: () => {
       queryClient.invalidateQueries({ queryKey: ROUTER_CONFIG_KEY });
       queryClient.invalidateQueries({ queryKey: ["proxyStatus"] });
+      queryClient.invalidateQueries({ queryKey: ["routerStatus"] });
     },
   });
 }

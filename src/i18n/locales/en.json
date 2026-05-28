@@ -2636,6 +2636,7 @@
       "opus": "Opus",
       "gpt": "GPT",
       "auto": "Auto"
-    }
+    },
+    "noProvider": "No matching provider for this routing mode"
   }
 }

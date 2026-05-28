@@ -148,3 +148,10 @@ export interface RouterConfig {
   classifierModel: string;
   cacheTtlSeconds: number;
 }
+
+/** 路由状态 */
+export interface RouterStatus {
+  mode: string;
+  hasMatchingProvider: boolean;
+  matchingProviderName: string | null;
+}
