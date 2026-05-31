@@ -1,438 +1,191 @@
+use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
-use serde_json::{Map, Value};
-use std::fs;
-use std::io::Write;
-use std::path::{Path, PathBuf};
+use std::collections::HashMap;
+use std::path::PathBuf;
+use std::sync::Arc;
+use tokio::sync::RwLock;
 
-use crate::error::AppError;
+/// Recent request log entry.
+#[derive(Debug, Clone, Serialize)]
+pub struct RequestLog {
+    pub request_model: String,
+    pub tag: String,
+    pub provider: String,
+    pub target_model: String,
+    pub timestamp: String,
+}
 
-/// 获取用户主目录，带回退和日志
-///
-/// ## Windows 注意事项
-///
-/// - `dirs::home_dir()` 在 Windows 上使用 `SHGetKnownFolderPath(FOLDERID_Profile)`，
-///   返回的是真实用户目录（类似 `C:\\Users\\Alice`），与 v3.10.2 行为一致。
-/// - 不要直接使用 `HOME` 环境变量：它可能由 Git/Cygwin/MSYS 等第三方工具注入，
-///   且不一定等于用户目录，可能导致 `.model-router/model-router.db` 路径变化，从而"看起来像数据丢失"。
-///
-/// ## 测试隔离
-///
-/// 为了让 Windows CI/本地测试能稳定隔离真实用户数据，可通过 `CC_SWITCH_TEST_HOME`
-/// 显式覆盖 home dir（仅用于测试/调试场景）。
-pub fn get_home_dir() -> PathBuf {
-    if let Ok(home) = std::env::var("CC_SWITCH_TEST_HOME") {
-        let trimmed = home.trim();
-        if !trimmed.is_empty() {
-            return PathBuf::from(trimmed);
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AppConfig {
+    #[serde(default = "default_port")]
+    pub port: u16,
+    #[serde(default)]
+    pub providers: HashMap<String, Provider>,
+    #[serde(default)]
+    pub routes: Vec<Route>,
+    #[serde(default)]
+    pub tags: Vec<Tag>,
+    #[serde(default = "default_tag")]
+    pub current_tag: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct Provider {
+    pub name: String,
+    pub base_url: String,
+    pub api_key: String,
+    #[serde(default = "default_auth_type")]
+    pub auth_type: AuthType,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "snake_case")]
+pub enum AuthType {
+    Bearer,
+    XApiKey,
+    XGoogApiKey,
+}
+
+impl AuthType {
+    pub fn header_name(&self) -> &str {
+        match self {
+            AuthType::Bearer => "authorization",
+            AuthType::XApiKey => "x-api-key",
+            AuthType::XGoogApiKey => "x-goog-api-key",
         }
     }
 
-    dirs::home_dir().unwrap_or_else(|| {
-        log::warn!("无法获取用户主目录，回退到当前目录");
-        PathBuf::from(".")
-    })
-}
-
-/// 获取 Claude Code 配置目录路径
-pub fn get_claude_config_dir() -> PathBuf {
-    if let Some(custom) = crate::settings::get_claude_override_dir() {
-        return custom;
-    }
-
-    get_home_dir().join(".claude")
-}
-
-/// 默认 Claude MCP 配置文件路径 (~/.claude.json)
-pub fn get_default_claude_mcp_path() -> PathBuf {
-    get_home_dir().join(".claude.json")
-}
-
-fn derive_mcp_path_from_override(dir: &Path) -> Option<PathBuf> {
-    let file_name = dir
-        .file_name()
-        .map(|name| name.to_string_lossy().to_string())?
-        .trim()
-        .to_string();
-    if file_name.is_empty() {
-        return None;
-    }
-    let parent = dir.parent().unwrap_or_else(|| Path::new(""));
-    Some(parent.join(format!("{file_name}.json")))
-}
-
-/// 获取 Claude MCP 配置文件路径，若设置了目录覆盖则与覆盖目录同级
-pub fn get_claude_mcp_path() -> PathBuf {
-    if let Some(custom_dir) = crate::settings::get_claude_override_dir() {
-        if let Some(path) = derive_mcp_path_from_override(&custom_dir) {
-            return path;
+    pub fn header_value(&self, api_key: &str) -> String {
+        match self {
+            AuthType::Bearer => format!("Bearer {}", api_key),
+            _ => api_key.to_string(),
         }
     }
-    get_default_claude_mcp_path()
 }
 
-/// 获取 Claude Code 主配置文件路径
-pub fn get_claude_settings_path() -> PathBuf {
-    let dir = get_claude_config_dir();
-    let settings = dir.join("settings.json");
-    if settings.exists() {
-        return settings;
-    }
-    // 兼容旧版命名：若存在旧文件则继续使用
-    let legacy = dir.join("claude.json");
-    if legacy.exists() {
-        return legacy;
-    }
-    // 默认新建：回落到标准文件名 settings.json（不再生成 claude.json）
-    settings
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "snake_case")]
+pub enum ProviderFormat {
+    Anthropic,
+    Openai,
+    #[serde(rename = "openai_responses")]
+    OpenaiResponses,
 }
 
-/// 获取应用配置目录路径 (~/.model-router)
-pub fn get_app_config_dir() -> PathBuf {
-    if let Some(custom) = crate::app_store::get_app_config_dir_override() {
-        return custom;
-    }
+fn default_format() -> ProviderFormat {
+    ProviderFormat::Openai
+}
 
-    let default_dir = get_home_dir().join(".model-router");
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct Route {
+    pub endpoint: String,
+    pub model: String,
+    pub provider: String,
+    #[serde(default)]
+    pub tags: Vec<String>,
+    #[serde(default = "default_format")]
+    pub format: ProviderFormat,
+}
 
-    // 自动迁移：如果新目录不存在但旧 ~/.cc-switch 目录存在，自动迁移
-    if !default_dir.exists() {
-        let legacy_dir = get_home_dir().join(".cc-switch");
-        if legacy_dir.exists() {
-            log::info!(
-                "Migrating data from {} to {}",
-                legacy_dir.display(),
-                default_dir.display()
-            );
-            if std::fs::rename(&legacy_dir, &default_dir).is_ok() {
-                log::info!("Migration successful");
-            } else {
-                // rename 失败（跨分区等），尝试 copy + remove
-                if let Err(e) = copy_dir_recursive(&legacy_dir, &default_dir) {
-                    log::error!("Migration failed: {}", e);
-                    // 回退到旧目录
-                    return legacy_dir;
-                }
-                log::info!("Migration via copy successful");
-            }
-            return default_dir;
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct Tag {
+    pub name: String,
+    #[serde(default)]
+    pub color: String,
+    #[serde(default)]
+    pub is_auto: bool,
+}
+
+fn default_port() -> u16 {
+    8082
+}
+
+fn default_tag() -> String {
+    "auto".to_string()
+}
+
+fn default_auth_type() -> AuthType {
+    AuthType::Bearer
+}
+
+impl Default for AppConfig {
+    fn default() -> Self {
+        Self {
+            port: default_port(),
+            providers: HashMap::new(),
+            routes: Vec::new(),
+            tags: Vec::new(),
+            current_tag: default_tag(),
         }
     }
-
-    default_dir
 }
 
-fn copy_dir_recursive(src: &std::path::Path, dst: &std::path::Path) -> std::io::Result<()> {
-    std::fs::create_dir_all(dst)?;
-    for entry in std::fs::read_dir(src)? {
-        let entry = entry?;
-        let src_path = entry.path();
-        let dst_path = dst.join(entry.file_name());
-        if src_path.is_dir() {
-            copy_dir_recursive(&src_path, &dst_path)?;
-        } else {
-            std::fs::copy(&src_path, &dst_path)?;
-        }
-    }
-    Ok(())
+pub fn config_path() -> Result<PathBuf> {
+    let home = dirs::home_dir().ok_or_else(|| anyhow::anyhow!("no home directory"))?;
+    Ok(home.join(".model-router").join("config.yaml"))
 }
 
-/// 获取应用配置文件路径
-pub fn get_app_config_path() -> PathBuf {
-    get_app_config_dir().join("config.json")
-}
-
-/// 清理供应商名称，确保文件名安全
-#[allow(dead_code)]
-pub fn sanitize_provider_name(name: &str) -> String {
-    name.chars()
-        .map(|c| match c {
-            '<' | '>' | ':' | '"' | '/' | '\\' | '|' | '?' | '*' => '-',
-            _ => c,
-        })
-        .collect::<String>()
-        .to_lowercase()
-}
-
-/// 获取供应商配置文件路径
-#[allow(dead_code)]
-pub fn get_provider_config_path(provider_id: &str, provider_name: Option<&str>) -> PathBuf {
-    let base_name = provider_name
-        .map(sanitize_provider_name)
-        .unwrap_or_else(|| sanitize_provider_name(provider_id));
-
-    get_claude_config_dir().join(format!("settings-{base_name}.json"))
-}
-
-/// 读取 JSON 配置文件
-pub fn read_json_file<T: for<'a> Deserialize<'a>>(path: &Path) -> Result<T, AppError> {
+pub fn load_config() -> Result<AppConfig> {
+    let path = config_path()?;
+    log::info!("[Config] loading config from {}", path.display());
     if !path.exists() {
-        return Err(AppError::Config(format!("文件不存在: {}", path.display())));
+        log::info!("[Config] config file not found, using defaults");
+        return Ok(AppConfig::default());
     }
-
-    let content = fs::read_to_string(path).map_err(|e| AppError::io(path, e))?;
-
-    serde_json::from_str(&content).map_err(|e| AppError::json(path, e))
+    let content = std::fs::read_to_string(&path)
+        .with_context(|| format!("reading {}", path.display()))?;
+    let config: AppConfig = serde_yaml::from_str(&content)
+        .with_context(|| format!("parsing {}", path.display()))?;
+    log::info!("[Config] loaded current_tag={}", config.current_tag);
+    Ok(config)
 }
 
-/// 递归排序 JSON 对象的键（按字母顺序），确保序列化输出是确定性的
-fn sort_json_keys(value: &Value) -> Value {
-    match value {
-        Value::Object(map) => {
-            let mut sorted_map = Map::new();
-            let mut keys: Vec<_> = map.keys().collect();
-            keys.sort();
-            for key in keys {
-                sorted_map.insert(key.clone(), sort_json_keys(&map[key]));
-            }
-            Value::Object(sorted_map)
-        }
-        Value::Array(arr) => Value::Array(arr.iter().map(sort_json_keys).collect()),
-        other => other.clone(),
-    }
-}
-
-/// 写入 JSON 配置文件（键按字母排序，确保确定性输出）
-pub fn write_json_file<T: Serialize>(path: &Path, data: &T) -> Result<(), AppError> {
-    // 确保目录存在
+pub fn save_config(config: &AppConfig) -> Result<()> {
+    let path = config_path()?;
     if let Some(parent) = path.parent() {
-        fs::create_dir_all(parent).map_err(|e| AppError::io(parent, e))?;
+        std::fs::create_dir_all(parent)?;
     }
+    let content = serde_yaml::to_string(config)?;
 
-    let value = serde_json::to_value(data).map_err(|e| AppError::JsonSerialize { source: e })?;
-    let sorted_value = sort_json_keys(&value);
-    let json = serde_json::to_string_pretty(&sorted_value)
-        .map_err(|e| AppError::JsonSerialize { source: e })?;
+    // Atomic write: write to temp file then rename
+    let tmp_path = path.with_extension("yaml.tmp");
+    std::fs::write(&tmp_path, &content)
+        .with_context(|| format!("writing {}", tmp_path.display()))?;
+    std::fs::rename(&tmp_path, &path)
+        .with_context(|| format!("renaming {} to {}", tmp_path.display(), path.display()))?;
 
-    atomic_write(path, json.as_bytes())
-}
-
-/// 原子写入文本文件（用于 TOML/纯文本）
-pub fn write_text_file(path: &Path, data: &str) -> Result<(), AppError> {
-    if let Some(parent) = path.parent() {
-        fs::create_dir_all(parent).map_err(|e| AppError::io(parent, e))?;
-    }
-    atomic_write(path, data.as_bytes())
-}
-
-/// 原子写入：写入临时文件后 rename 替换，避免半写状态
-pub fn atomic_write(path: &Path, data: &[u8]) -> Result<(), AppError> {
-    if let Some(parent) = path.parent() {
-        fs::create_dir_all(parent).map_err(|e| AppError::io(parent, e))?;
-    }
-
-    let parent = path
-        .parent()
-        .ok_or_else(|| AppError::Config("无效的路径".to_string()))?;
-    let mut tmp = parent.to_path_buf();
-    let file_name = path
-        .file_name()
-        .ok_or_else(|| AppError::Config("无效的文件名".to_string()))?
-        .to_string_lossy()
-        .to_string();
-    let ts = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .unwrap_or_default()
-        .as_nanos();
-    tmp.push(format!("{file_name}.tmp.{ts}"));
-
-    {
-        let mut f = fs::File::create(&tmp).map_err(|e| AppError::io(&tmp, e))?;
-        f.write_all(data).map_err(|e| AppError::io(&tmp, e))?;
-        f.flush().map_err(|e| AppError::io(&tmp, e))?;
-    }
-
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-        if let Ok(meta) = fs::metadata(path) {
-            let perm = meta.permissions().mode();
-            let _ = fs::set_permissions(&tmp, fs::Permissions::from_mode(perm));
-        }
-    }
-
-    #[cfg(windows)]
-    {
-        // Windows 上 rename 目标存在会失败，先移除再重命名（尽量接近原子性）
-        if path.exists() {
-            let _ = fs::remove_file(path);
-        }
-        fs::rename(&tmp, path).map_err(|e| AppError::IoContext {
-            context: format!("原子替换失败: {} -> {}", tmp.display(), path.display()),
-            source: e,
-        })?;
-    }
-
-    #[cfg(not(windows))]
-    {
-        fs::rename(&tmp, path).map_err(|e| AppError::IoContext {
-            context: format!("原子替换失败: {} -> {}", tmp.display(), path.display()),
-            source: e,
-        })?;
-    }
     Ok(())
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
+const MAX_LOG_ENTRIES: usize = 50;
 
-    #[test]
-    fn derive_mcp_path_from_override_preserves_folder_name() {
-        let override_dir = PathBuf::from("/tmp/profile/.claude");
-        let derived = derive_mcp_path_from_override(&override_dir)
-            .expect("should derive path for nested dir");
-        assert_eq!(derived, PathBuf::from("/tmp/profile/.claude.json"));
+#[derive(Clone)]
+pub struct AppState {
+    pub config: Arc<RwLock<AppConfig>>,
+    pub http_client: reqwest::Client,
+    pub request_log: Arc<RwLock<Vec<RequestLog>>>,
+    pub web_dist: PathBuf,
+}
+
+impl AppState {
+    pub fn new(config: AppConfig, web_dist: PathBuf) -> Result<Self> {
+        let http_client = reqwest::Client::builder()
+            .timeout(std::time::Duration::from_secs(3600))
+            .build()
+            .map_err(|e| anyhow::anyhow!("failed to create HTTP client: {}", e))?;
+        Ok(Self {
+            config: Arc::new(RwLock::new(config)),
+            http_client,
+            request_log: Arc::new(RwLock::new(Vec::new())),
+            web_dist,
+        })
     }
 
-    #[test]
-    fn derive_mcp_path_from_override_handles_non_hidden_folder() {
-        let override_dir = PathBuf::from("/data/claude-config");
-        let derived = derive_mcp_path_from_override(&override_dir)
-            .expect("should derive path for standard dir");
-        assert_eq!(derived, PathBuf::from("/data/claude-config.json"));
-    }
-
-    #[test]
-    fn derive_mcp_path_from_override_supports_relative_rootless_dir() {
-        let override_dir = PathBuf::from("claude");
-        let derived = derive_mcp_path_from_override(&override_dir)
-            .expect("should derive path for single segment");
-        assert_eq!(derived, PathBuf::from("claude.json"));
-    }
-
-    #[test]
-    fn derive_mcp_path_from_root_like_dir_returns_none() {
-        let override_dir = PathBuf::from("/");
-        assert!(derive_mcp_path_from_override(&override_dir).is_none());
-    }
-
-    #[test]
-    fn sort_json_keys_sorts_top_level_object() {
-        let input = serde_json::json!({
-            "z": 1,
-            "a": 2,
-            "m": 3,
-        });
-        let sorted = sort_json_keys(&input);
-        let serialized = serde_json::to_string(&sorted).unwrap();
-        assert_eq!(serialized, r#"{"a":2,"m":3,"z":1}"#);
-    }
-
-    #[test]
-    fn sort_json_keys_recurses_into_nested_objects() {
-        let input = serde_json::json!({
-            "outer_b": {"z": 1, "a": 2},
-            "outer_a": {"y": 3, "b": 4},
-        });
-        let sorted = sort_json_keys(&input);
-        let serialized = serde_json::to_string(&sorted).unwrap();
-        assert_eq!(
-            serialized,
-            r#"{"outer_a":{"b":4,"y":3},"outer_b":{"a":2,"z":1}}"#
-        );
-    }
-
-    #[test]
-    fn sort_json_keys_preserves_array_order() {
-        let input = serde_json::json!([3, 1, 2]);
-        let sorted = sort_json_keys(&input);
-        let serialized = serde_json::to_string(&sorted).unwrap();
-        assert_eq!(serialized, "[3,1,2]");
-    }
-
-    #[test]
-    fn sort_json_keys_sorts_objects_inside_arrays_but_keeps_array_order() {
-        let input = serde_json::json!([
-            {"z": 1, "a": 2},
-            {"y": 3, "b": 4},
-        ]);
-        let sorted = sort_json_keys(&input);
-        let serialized = serde_json::to_string(&sorted).unwrap();
-        assert_eq!(serialized, r#"[{"a":2,"z":1},{"b":4,"y":3}]"#);
-    }
-
-    #[test]
-    fn sort_json_keys_passes_through_primitives() {
-        let cases = vec![
-            serde_json::json!("hello"),
-            serde_json::json!(42),
-            serde_json::json!(3.5),
-            serde_json::json!(true),
-            serde_json::json!(null),
-        ];
-        for value in cases {
-            let sorted = sort_json_keys(&value);
-            assert_eq!(sorted, value);
+    pub async fn log_request(&self, entry: RequestLog) {
+        let mut log = self.request_log.write().await;
+        log.push(entry);
+        if log.len() > MAX_LOG_ENTRIES {
+            log.remove(0);
         }
-    }
-
-    #[test]
-    fn sort_json_keys_handles_empty_collections() {
-        let empty_obj = serde_json::json!({});
-        assert_eq!(
-            serde_json::to_string(&sort_json_keys(&empty_obj)).unwrap(),
-            "{}"
-        );
-
-        let empty_arr = serde_json::json!([]);
-        assert_eq!(
-            serde_json::to_string(&sort_json_keys(&empty_arr)).unwrap(),
-            "[]"
-        );
-    }
-
-    #[test]
-    fn sort_json_keys_produces_identical_output_for_different_insertion_orders() {
-        // 核心保证：同一逻辑配置无论键的插入顺序如何，写出的字节序列必须一致。
-        let mut a = Map::new();
-        a.insert("env".to_string(), serde_json::json!({"PATH": "/usr/bin"}));
-        a.insert("model".to_string(), serde_json::json!("claude-sonnet-4-5"));
-        a.insert("permissions".to_string(), serde_json::json!({"allow": []}));
-
-        let mut b = Map::new();
-        b.insert("permissions".to_string(), serde_json::json!({"allow": []}));
-        b.insert("model".to_string(), serde_json::json!("claude-sonnet-4-5"));
-        b.insert("env".to_string(), serde_json::json!({"PATH": "/usr/bin"}));
-
-        let sorted_a = sort_json_keys(&Value::Object(a));
-        let sorted_b = sort_json_keys(&Value::Object(b));
-
-        assert_eq!(
-            serde_json::to_string(&sorted_a).unwrap(),
-            serde_json::to_string(&sorted_b).unwrap(),
-        );
-    }
-}
-
-/// 复制文件
-pub fn copy_file(from: &Path, to: &Path) -> Result<(), AppError> {
-    fs::copy(from, to).map_err(|e| AppError::IoContext {
-        context: format!("复制文件失败 ({} -> {})", from.display(), to.display()),
-        source: e,
-    })?;
-    Ok(())
-}
-
-/// 删除文件
-pub fn delete_file(path: &Path) -> Result<(), AppError> {
-    if path.exists() {
-        fs::remove_file(path).map_err(|e| AppError::io(path, e))?;
-    }
-    Ok(())
-}
-
-/// 检查 Claude Code 配置状态
-#[derive(Serialize, Deserialize)]
-pub struct ConfigStatus {
-    pub exists: bool,
-    pub path: String,
-}
-
-/// 获取 Claude Code 配置状态
-pub fn get_claude_config_status() -> ConfigStatus {
-    let path = get_claude_settings_path();
-    ConfigStatus {
-        exists: path.exists(),
-        path: path.to_string_lossy().to_string(),
     }
 }

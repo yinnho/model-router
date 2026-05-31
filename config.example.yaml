@@ -1,0 +1,76 @@
+port: 8082
+
+providers:
+  deepseek:
+    name: DeepSeek
+    base_url: https://api.deepseek.com
+    api_key: sk-your-deepseek-key
+    auth_type: bearer
+
+  zhipu:
+    name: Zhipu GLM
+    base_url: https://open.bigmodel.cn
+    api_key: your-zhipu-key
+    auth_type: bearer
+
+  moonshot:
+    name: Moonshot (Kimi)
+    base_url: https://api.moonshot.cn
+    api_key: your-moonshot-key
+    auth_type: bearer
+
+  siliconflow:
+    name: SiliconFlow
+    base_url: https://api.siliconflow.cn
+    api_key: your-siliconflow-key
+    auth_type: bearer
+
+  dashscope:
+    name: Qwen (DashScope)
+    base_url: https://dashscope.aliyuncs.com/compatible-mode
+    api_key: your-dashscope-key
+    auth_type: bearer
+
+  minimax:
+    name: Minimax
+    base_url: https://api.minimax.chat
+    api_key: your-minimax-key
+    auth_type: bearer
+
+routes:
+  # opus → Anthropic format providers (passthrough)
+  - endpoint: /api/anthropic/v1/messages
+    model: glm-5.1
+    provider: zhipu
+    format: anthropic
+    tags: [opus]
+
+  # sonnet → OpenAI format providers
+  - endpoint: /v1/chat/completions
+    model: deepseek-v4-pro
+    provider: deepseek
+    format: openai
+    tags: [sonnet]
+
+  # haiku → lighter/faster models
+  - endpoint: /v1/chat/completions
+    model: deepseek-v4-flash
+    provider: deepseek
+    format: openai
+    tags: [haiku]
+
+tags:
+  - name: haiku
+    color: "#22C55E"
+
+  - name: sonnet
+    color: "#3B82F6"
+
+  - name: opus
+    color: "#A855F7"
+
+  - name: auto
+    color: "#F59E0B"
+    is_auto: true
+
+current_tag: auto
