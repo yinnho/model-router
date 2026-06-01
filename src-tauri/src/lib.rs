@@ -8,6 +8,8 @@ mod tray;
 
 use config::load_config;
 use tauri::Manager;
+use crate::takeover::{check_codex_takeover_status, check_takeover_status,
+    take_over_claude, take_over_codex};
 
 pub fn run() {
     env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("info")).init();
@@ -51,6 +53,11 @@ pub fn run() {
             let port = rx.recv().map_err(|e| format!("server failed to start: {}", e))?;
             log::info!("[Tauri] axum server ready on port {}", port);
 
+            // 5b. Rewrite stale takeover configs if the port changed since last run
+            // This ensures CLI tools (Claude Code, Codex) can reach the proxy even
+            // if the user changed the port in config.yaml.
+            refresh_takeover_configs(port);
+
             // 6. Create main window
             // In dev mode, load from Vite dev server (API calls are proxied by Vite)
             // In production, load from axum (which serves bundled static files)
@@ -93,5 +100,56 @@ pub fn run() {
     if let Err(e) = result {
         log::error!("[Tauri] fatal error: {}", e);
         panic!("error while running tauri application: {}", e);
+    }
+}
+
+/// On startup, rewrite takeover configs if they were active but point to a
+/// different port than the one the server just bound to.  This handles the
+/// common case where the user changes `port` in config.yaml and restarts.
+fn refresh_takeover_configs(port: u16) {
+    // Claude Code takeover
+    let claude_status = check_takeover_status(port);
+    if claude_status.active {
+        log::info!("[Startup] Claude Code takeover active on correct port {}", port);
+    } else {
+        // Check if settings.json has a stale model-router base URL
+        let claude_settings = match dirs::home_dir() {
+            Some(h) => h.join(".claude").join("settings.json"),
+            None => return,
+        };
+        if claude_settings.exists() {
+            if let Ok(content) = std::fs::read_to_string(&claude_settings) {
+                if content.contains("model-router") || content.contains("127.0.0.1") {
+                    log::info!("[Startup] Refreshing stale Claude Code takeover to port {}", port);
+                    if let Err(e) = take_over_claude(port) {
+                        log::warn!("[Startup] Failed to refresh Claude Code takeover: {}", e);
+                    }
+                }
+            }
+        }
+    }
+
+    // Codex takeover
+    let codex_status = check_codex_takeover_status(port);
+    if codex_status.active {
+        log::info!("[Startup] Codex takeover active on correct port {}", port);
+    } else {
+        // Check if config.toml has a stale model-router provider
+        let codex_config_path = match dirs::home_dir() {
+            Some(h) => h.join(".codex").join("config.toml"),
+            None => return,
+        };
+        if codex_config_path.exists() {
+            let content = match std::fs::read_to_string(&codex_config_path) {
+                Ok(c) => c,
+                Err(_) => return,
+            };
+            if content.contains("model-router") && !content.contains(&format!("127.0.0.1:{}", port)) {
+                log::info!("[Startup] Refreshing stale Codex takeover to port {}", port);
+                if let Err(e) = take_over_codex(port, "gpt-5.5") {
+                    log::warn!("[Startup] Failed to refresh Codex takeover: {}", e);
+                }
+            }
+        }
     }
 }

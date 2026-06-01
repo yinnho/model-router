@@ -27,6 +27,21 @@ export interface AppConfig {
   routes: Route[];
   tags: Tag[];
   current_tag: string;
+  management_key: string;
+}
+
+let managementKey: string | null = null;
+
+export function setManagementKey(key: string) {
+  managementKey = key;
+}
+
+function authHeaders(): Record<string, string> {
+  const headers: Record<string, string> = {};
+  if (managementKey) {
+    headers['x-management-key'] = managementKey;
+  }
+  return headers;
 }
 
 export interface Status {
@@ -51,13 +66,17 @@ export interface RequestLog {
 
 export async function getConfig(): Promise<AppConfig> {
   const res = await fetch(`${API_BASE}/config`);
-  return res.json();
+  const config = await res.json();
+  if (config.management_key) {
+    setManagementKey(config.management_key);
+  }
+  return config;
 }
 
 export async function updateConfig(config: AppConfig): Promise<void> {
   await fetch(`${API_BASE}/config`, {
     method: 'PUT',
-    headers: { 'Content-Type': 'application/json' },
+    headers: { 'Content-Type': 'application/json', ...authHeaders() },
     body: JSON.stringify(config),
   });
 }
@@ -65,7 +84,7 @@ export async function updateConfig(config: AppConfig): Promise<void> {
 export async function setCurrentTag(tag: string): Promise<void> {
   await fetch(`${API_BASE}/current-tag`, {
     method: 'PUT',
-    headers: { 'Content-Type': 'application/json' },
+    headers: { 'Content-Type': 'application/json', ...authHeaders() },
     body: JSON.stringify({ tag }),
   });
 }
@@ -76,21 +95,33 @@ export async function getStatus(): Promise<Status> {
 }
 
 export async function takeoverClaude(): Promise<{ proxy_url: string }> {
-  const res = await fetch(`${API_BASE}/takeover/claude`, { method: 'POST' });
+  const res = await fetch(`${API_BASE}/takeover/claude`, {
+    method: 'POST',
+    headers: authHeaders(),
+  });
   return res.json();
 }
 
 export async function restoreClaude(): Promise<void> {
-  await fetch(`${API_BASE}/takeover/claude`, { method: 'DELETE' });
+  await fetch(`${API_BASE}/takeover/claude`, {
+    method: 'DELETE',
+    headers: authHeaders(),
+  });
 }
 
 export async function takeoverCodex(): Promise<{ proxy_url: string }> {
-  const res = await fetch(`${API_BASE}/takeover/codex`, { method: 'POST' });
+  const res = await fetch(`${API_BASE}/takeover/codex`, {
+    method: 'POST',
+    headers: authHeaders(),
+  });
   return res.json();
 }
 
 export async function restoreCodex(): Promise<void> {
-  await fetch(`${API_BASE}/takeover/codex`, { method: 'DELETE' });
+  await fetch(`${API_BASE}/takeover/codex`, {
+    method: 'DELETE',
+    headers: authHeaders(),
+  });
 }
 
 export async function getLogs(): Promise<RequestLog[]> {
@@ -112,7 +143,7 @@ export interface TestResult {
 export async function testRoute(tag: string, prompt?: string): Promise<TestResult> {
   const res = await fetch(`${API_BASE}/test`, {
     method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
+    headers: { 'Content-Type': 'application/json', ...authHeaders() },
     body: JSON.stringify({ tag, prompt: prompt || 'Hi, reply with one word.' }),
   });
   return res.json();
