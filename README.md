@@ -50,7 +50,7 @@ provider 返回的 `model` 字段会被替换为原始请求的模型别名，�
 
 ### 管理界面
 
-内建 Web UI（`http://127.0.0.1:8082`）：
+内建 Web UI（`http://127.0.0.1:8083`）：
 
 - 实时请求日志
 - Provider / 路由 / 标签管理
@@ -109,7 +109,7 @@ npm --prefix web run tauri build
 编辑 `~/.model-router/config.yaml`：
 
 ```yaml
-port: 8082
+port: 8083
 current_tag: auto
 
 tags:
@@ -151,7 +151,7 @@ routes:
 ### 使用
 
 1. 启动 Model Router（系统托盘常驻）
-2. 浏览器打开 `http://127.0.0.1:8082`
+2. 浏览器打开 `http://127.0.0.1:8083`
 3. 点击 **Claude Code** 或 **Codex** 开关接管 CLI 配置
 4. 正常使用 Claude Code / Codex CLI — 所有流量自动经过 Model Router
 
@@ -161,7 +161,7 @@ routes:
 
 | 字段 | 类型 | 说明 |
 |-----|------|------|
-| `port` | number | 监听端口 (默认 8082) |
+| `port` | number | 监听端口 (默认 8083) |
 | `current_tag` | string | 当前激活的标签 |
 | `management_key` | string | 管理 API 认证密钥 (默认 `model-router-local`) |
 | `providers` | map | Provider 配置 (name / base_url / api_key / auth_type) |

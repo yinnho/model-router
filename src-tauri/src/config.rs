@@ -99,7 +99,7 @@ pub struct Tag {
 }
 
 fn default_port() -> u16 {
-    8082
+    8083
 }
 
 fn default_tag() -> String {
@@ -228,7 +228,7 @@ mod tests {
     #[test]
     fn test_default_config_has_sensible_values() {
         let cfg = AppConfig::default();
-        assert_eq!(cfg.port, 8082);
+        assert_eq!(cfg.port, 8083);
         assert_eq!(cfg.current_tag, "auto");
         assert_eq!(cfg.management_key, "model-router-local");
         assert!(cfg.providers.is_empty());
