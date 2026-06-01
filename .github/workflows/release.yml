@@ -37,7 +37,7 @@ jobs:
           node-version: 22
 
       - name: Install frontend dependencies
-        run: npm --prefix web install
+        run: cd web && npm install
 
       - name: Install macOS targets
         if: matrix.platform == 'macos-latest'
