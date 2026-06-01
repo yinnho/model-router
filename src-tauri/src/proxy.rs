@@ -469,6 +469,22 @@ async fn handle_proxy(
                     .body(body)
                     .map_err(|e| ProxyError::Upstream(format!("failed to build streaming response: {}", e)))?)
             }
+            ("anthropic", ProviderFormat::Anthropic)
+            | ("openai", ProviderFormat::Openai)
+            | ("openai_responses", ProviderFormat::OpenaiResponses) => {
+                // Passthrough: forward raw bytes without JSON parsing
+                let stream = resp.bytes_stream().map(|result| {
+                    result.map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, e))
+                });
+                let body = Body::from_stream(stream);
+
+                Ok(Response::builder()
+                    .status(StatusCode::OK)
+                    .header("content-type", "text/event-stream")
+                    .header("cache-control", "no-cache")
+                    .body(body)
+                    .map_err(|e| ProxyError::Upstream(format!("failed to build streaming response: {}", e)))?)
+            }
             _ => {
                 // Passthrough streaming with model preservation
                 let stream = resp.bytes_stream().map(|result| {
@@ -498,7 +514,7 @@ async fn handle_proxy(
                 // Convert OpenAI Chat response → Anthropic response
                 let openai_resp: Value = parse_upstream_json(&resp_body)?;
                 let anthropic_resp = convert::openai_to_anthropic_response(&openai_resp, &request_model);
-                let anthropic_bytes = serde_json::to_vec(&anthropic_resp).unwrap_or_default();
+                let anthropic_bytes = serde_json::to_vec(&anthropic_resp).unwrap_or(resp_body.to_vec());
                 Ok((
                     status_code,
                     [("content-type", "application/json")],
@@ -510,7 +526,7 @@ async fn handle_proxy(
                 // Convert OpenAI Responses response → Anthropic response
                 let responses_resp: Value = parse_upstream_json(&resp_body)?;
                 let anthropic_resp = convert::responses_to_anthropic_response(&responses_resp, &request_model);
-                let anthropic_bytes = serde_json::to_vec(&anthropic_resp).unwrap_or_default();
+                let anthropic_bytes = serde_json::to_vec(&anthropic_resp).unwrap_or(resp_body.to_vec());
                 Ok((
                     status_code,
                     [("content-type", "application/json")],
@@ -522,7 +538,7 @@ async fn handle_proxy(
                 // Convert OpenAI Responses response → OpenAI Chat response
                 let responses_resp: Value = parse_upstream_json(&resp_body)?;
                 let openai_resp = convert::responses_to_openai_response(&responses_resp, &request_model);
-                let openai_bytes = serde_json::to_vec(&openai_resp).unwrap_or_default();
+                let openai_bytes = serde_json::to_vec(&openai_resp).unwrap_or(resp_body.to_vec());
                 Ok((
                     status_code,
                     [("content-type", "application/json")],
@@ -534,7 +550,7 @@ async fn handle_proxy(
                 // Convert Anthropic response → OpenAI Chat response
                 let anthropic_resp: Value = parse_upstream_json(&resp_body)?;
                 let openai_resp = convert::anthropic_to_openai_response(&anthropic_resp, &request_model);
-                let openai_bytes = serde_json::to_vec(&openai_resp).unwrap_or_default();
+                let openai_bytes = serde_json::to_vec(&openai_resp).unwrap_or(resp_body.to_vec());
                 Ok((
                     status_code,
                     [("content-type", "application/json")],
@@ -546,7 +562,7 @@ async fn handle_proxy(
                 // Convert OpenAI Chat response → Responses API response (for Codex)
                 let chat_resp: Value = parse_upstream_json(&resp_body)?;
                 let responses_resp = convert::chat_to_responses_response(&chat_resp, &request_model);
-                let bytes = serde_json::to_vec(&responses_resp).unwrap_or_default();
+                let bytes = serde_json::to_vec(&responses_resp).unwrap_or(resp_body.to_vec());
                 Ok((
                     status_code,
                     [("content-type", "application/json")],
@@ -558,7 +574,7 @@ async fn handle_proxy(
                 // Convert Anthropic response → Responses API response (for Codex)
                 let anthropic_resp: Value = parse_upstream_json(&resp_body)?;
                 let responses_resp = convert::anthropic_to_responses_response(&anthropic_resp, &request_model);
-                let bytes = serde_json::to_vec(&responses_resp).unwrap_or_default();
+                let bytes = serde_json::to_vec(&responses_resp).unwrap_or(resp_body.to_vec());
                 Ok((
                     status_code,
                     [("content-type", "application/json")],
@@ -591,11 +607,11 @@ async fn handle_proxy(
 }
 
 // ---------------------------------------------------------------------------
-// Count tokens handler (Anthropic passthrough only for now)
+// Count tokens handler
 // ---------------------------------------------------------------------------
 
 async fn handle_count_tokens(
-    _client_protocol: &str,
+    client_protocol: &str,
     State(state): State<AppState>,
     headers: HeaderMap,
     body: axum::Json<Value>,
@@ -606,7 +622,7 @@ async fn handle_count_tokens(
         .and_then(|m| m.as_str())
         .unwrap_or("")
         .to_string();
-    log::info!("[Proxy] count_tokens request: model={}", request_model);
+    log::info!("[Proxy] count_tokens request: protocol={}, model={}", client_protocol, request_model);
 
     let config = state.config.read().await;
 
@@ -637,15 +653,39 @@ async fn handle_count_tokens(
     }
 
     log::info!(
-        "[Proxy] count_tokens: {} → {} (model={})",
+        "[Proxy] count_tokens: {} → {} (model={}, format={:?})",
         tag,
         provider.name,
-        route.model
+        route.model,
+        route.format
     );
 
-    let mut fwd_body = body.clone();
-    fwd_body["model"] = Value::String(route.model.clone());
-    normalize_roles(&mut fwd_body);
+    // Apply protocol conversion based on (client_protocol, provider_format)
+    let fwd_body = match (client_protocol, &route.format) {
+        ("anthropic", ProviderFormat::Anthropic) => {
+            let mut b = body.clone();
+            b["model"] = Value::String(route.model.clone());
+            normalize_roles(&mut b);
+            b
+        }
+        ("anthropic", ProviderFormat::Openai) => {
+            let mut b = body.clone();
+            normalize_roles(&mut b);
+            convert::anthropic_to_openai_request(&b, &route.model)
+        }
+        ("anthropic", ProviderFormat::OpenaiResponses) => {
+            let mut b = body.clone();
+            normalize_roles(&mut b);
+            strip_thinking(&mut b);
+            convert::anthropic_to_responses_request(&b, &route.model)
+        }
+        _ => {
+            return Err(ProxyError::Upstream(format!(
+                "count_tokens not supported for protocol {} with format {:?}",
+                client_protocol, route.format
+            )));
+        }
+    };
 
     let url = format!(
         "{}{}/count_tokens",
