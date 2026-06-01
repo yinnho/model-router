@@ -1,131 +1,96 @@
-# Claude Code 新版不能用国产模型了？这个开源工具完美解决
+# 用国产模型跑 Claude Code，每年省下几千块
 
-## 背景：更新即「阵痛」
+## 先算一笔账
 
-Claude Code 最近更新到了 2.1.x 版本（当前 2.1.158），带来了 Opus 4.8 等重磅更新。但很多使用国内模型（DeepSeek、智谱 GLM、通义千问、Kimi 等）的用户发现——**更新后没法用了**。
+Claude Code 的工作方式是：**根据任务复杂度，自动切换模型**。
 
-社区里常见的「解决方案」只有一个：**降级到旧版本**。
+- 简单问题 → haiku
+- 日常编码 → sonnet
+- 复杂推理 → opus
 
-但降级不是长久之计。新版本的 Opus 4.8、动态工作流（Dynamic Workflows）、Fast Mode 等特性都用不了。
+这个设计很聪明。但问题是：**Anthropic 的 opus 很贵，sonnet 也不便宜**。
 
-为什么会这样？问题的根源在哪里？
+以一个典型工作日为例，Claude Code 大约发出 200-400 次请求，其中：
 
-## Opus 4.8 带来的三个「坑」
+| 模型 | 占比 | 单次 token 成本 | 日成本（估算） |
+|------|------|----------------|--------------|
+| opus | ~20% | $0.015/1K | $3-5 |
+| sonnet | ~60% | $0.003/1K | $2-4 |
+| haiku | ~20% | $0.0003/1K | $0.1 |
+
+**一天 $5-10，一个月 $150-300，一年 $2000-4000。**
+
+如果 opus 走智谱 GLM（价格约为 Anthropic 的 1/10），sonnet 走 DeepSeek Pro，haiku 走 DeepSeek Flash——**同样的工作流，成本可以降到原来的 1/5 甚至更低**。
+
+但问题来了：**怎么让 Claude Code 的 opus/sonnet/haiku 请求，分别走到不同的国产模型上？**
+
+## Model Router：模型路由器
 
 ![Model Router 日志界面 — 实时请求日志，彩色 Tag 标签](./web/src/assets/screenshots/logs.png)
 
-### 坑一：Thinking Blocks 协议变更
+**Model Router** 是一个开源桌面应用（Tauri v2 + Rust），位于 Claude Code 和模型提供商之间，做两件事：
 
-2.1.154 引入 Opus 4.8，随之而来的是 **thinking blocks（思考块）**的大量使用。这是 Anthropic Messages 协议的新特性，在 API 响应中新增了 `type: "thinking"` 的内容块。
+1. **按标签路由**：opus → 智谱 GLM，sonnet → DeepSeek Pro，haiku → DeepSeek Flash
+2. **协议转换**：Claude Code 用 Anthropic Messages 协议，但 DeepSeek 只认 OpenAI Chat 协议——Model Router 自动转换
 
-2.1.156 的 changelog 明确写道：
+**Claude Code 的智能调度能力不变，但推理成本大幅降低。**
 
-> *"Fixed an issue when using Opus 4.8 where thinking blocks were modified, leading to API errors."*
+### 它不是简单的代理
 
-问题在于：**国内支持 Anthropic 格式的 provider（如百度文心、智谱 GLM），不一定支持 thinking blocks**。当 Claude Code 发送包含思考参数的请求，或者收到包含 thinking 块的响应时，解析就会出错。
-
-### 坑二：模型反馈循环
-
-这是另一个隐蔽但破坏力巨大的问题。
-
-Claude Code 2.1.x 引入了 `ANTHROPIC_DEFAULT_OPUS_MODEL` / `ANTHROPIC_DEFAULT_SONNET_MODEL` / `ANTHROPIC_DEFAULT_HAIKU_MODEL` 三个环境变量，允许用户为 opus/sonnet/haiku 别名指定不同的模型。
-
-工作流程是这样的：
-
-1. 你设 `ANTHROPIC_DEFAULT_OPUS_MODEL=glm-5.1`
-2. Claude Code 发请求，model 字段是 `glm-5.1`
-3. 智谱返回 `model: "glm-5.1"`
-4. **Claude Code 记住了这个模型名**，下次直接发 `model: "glm-5.1"`
-
-问题来了：你的路由配置只认 `opus` / `sonnet` / `haiku` / `auto` 这些标签，`glm-5.1` 这个值该走哪个路由？
-
-这就导致**路由逻辑彻底失效**，每次请求都可能走错 provider，甚至报错。
-
-### 坑三：协议格式不兼容
-
-Claude Code 使用的是 **Anthropic Messages API 格式**。但国内模型提供商（DeepSeek、Moonshot、SiliconFlow 等）大多只支持 **OpenAI Chat Completions 格式**，有些支持 OpenAI Responses 格式。
+普通代理只能把请求原样转发，要求两边用同一个协议。Model Router 不一样——它是**协议感知的智能路由**：
 
 ```
-Claude Code 发送：
-POST /v1/messages
-{
-  "model": "haiku",
-  "messages": [{"role": "user", "content": "Hi"}],
-  "max_tokens": 4096
-}
-
-DeepSeek 需要：
-POST /v1/chat/completions
-{
-  "model": "deepseek-v4-pro",
-  "messages": [{"role": "user", "content": "Hi"}]
-}
+Claude Code 发出：                   Model Router 转发到：
+POST /v1/messages                   POST /v1/chat/completions
+{                                   {
+  "model": "opus",        →           "model": "glm-5.1",
+  "messages": [...],                  "messages": [...],
+  "max_tokens": 4096                  "max_tokens": 4096
+}                                   }
 ```
 
-没有协议转换层，Claude Code 根本无法和国内模型通信。
+请求格式、响应格式、流式 SSE，全部自动转换。对 Claude Code 来说，它以为自己在跟 Anthropic API 通信；对 provider 来说，它以为自己在服务一个 OpenAI 格式的客户端。
 
-## Model Router：一劳永逸的解决方案
+## 三大核心功能
 
-**Model Router** 是一个开源桌面应用（Tauri v2 + Rust），位于 Claude Code 和模型 provider 之间，同时解决以上三个问题。
-
-![Model Router 界面总览 — 页头 + Takeover 开关](./web/src/assets/screenshots/takeover.png)
-
-### 解决问题一：Thinking Blocks 兼容
-
-Model Router 在流式响应中自动处理 thinking 块：
-
-- 如果 provider 返回了 thinking 块，正确透传，保证 Claude Code 不报错
-- 流式转换中对 thinking 块的 `block_index` 做严格的状态机管理，防止索引错乱
-- 支持 `reasoning_content`（DeepSeek 等 OpenAI 格式的思考内容）→ `thinking` 块的自动转换
-
-再也不会出现 "Content block not found" 之类的 API 错误。
-
-### 解决问题二：模型名保护（切断反馈循环）
-
-对于所有非 streaming 和 streaming 响应，Model Router **在返回给 Claude Code 之前，将 provider 返回的 model 字段替换为原始请求的模型名**：
-
-```
-provider 返回: model: "glm-5.1"    ← 原始值
-Model Router 替换后: model: "sonnet"  ← 原始请求别名
-```
-
-Claude Code 永远只看到 `opus` / `sonnet` / `haiku` / `auto` 这些它认识的模型别名，**永远不会学习到 provider 的模型名**。反馈循环被彻底切断。
-
-### 解决问题三：三向协议转换
-
-![Provider 配置界面 — 管理多个模型提供商](./web/src/assets/screenshots/providers.png)
-
-Model Router 支持三种主流 API 格式的任意互转：
-
-| 客户端格式 | Provider 格式 | 典型场景 |
-|-----------|-------------|---------|
-| Anthropic Messages | OpenAI Chat | DeepSeek、Moonshot、SiliconFlow |
-| Anthropic Messages | OpenAI Responses | 通义千问 DashScope |
-| OpenAI Chat | OpenAI Responses | 跨格式兼容 |
-| Anthropic Messages | Anthropic（透传） | 百度文心、智谱 GLM |
-
-**流式 SSE 转换同样完整支持**，thinking 块、text 块、tool_use 块全部正确处理。
-
-### 四、标签路由系统
+### 一、标签路由——把 Claude Code 的调度能力用到国产模型上
 
 ![路由配置界面 — 每个路由绑定 Tag、Provider、模型名](./web/src/assets/screenshots/routes.png)
 
-支持自定义路由规则：
+Claude Code 内部会根据任务难度，在 opus/sonnet/haiku 之间自动切换。Model Router 利用这个机制，把每个档位路由到不同的国产模型：
 
 ```
-opus → 百度文心 (qianfan-code-latest)
-sonnet → 智谱 GLM (glm-5.1)
-haiku → DeepSeek (deepseek-v4-pro)
-auto → Moonshot Kimi (K2.6)
+opus   → 智谱 GLM (glm-5.1)        ← 强推理能力，价格是 Opus 的 1/10
+sonnet → DeepSeek (deepseek-v4-pro)  ← 编码能力出色，价格是 Sonnet 的 1/5
+haiku  → DeepSeek (deepseek-v4-flash) ← 极速响应，几乎不花钱
+auto   → Moonshot Kimi (K2.6)        ← 未识别模型自动走这里
 ```
 
-**任何未识别的模型名（如 `glm-5.1`、`deepseek-v4-pro`）自动走 `auto` 路由**，不会再丢失任何请求。
+**你不需要改变 Claude Code 的任何使用习惯。** 该用 opus 还是用 opus，只是背后实际跑的是智谱 GLM。
 
-### 五、一键接管 / 恢复
+### 二、协议转换——三种主流格式任意互转
+
+![Provider 配置界面 — 管理多个模型提供商](./web/src/assets/screenshots/providers.png)
+
+不同提供商用不同的 API 格式，Model Router 支持三向互转：
+
+| 客户端格式 | Provider 格式 | 典型场景 |
+|-----------|-------------|---------|
+| Anthropic Messages | OpenAI Chat Completions | DeepSeek、Moonshot、SiliconFlow |
+| Anthropic Messages | OpenAI Responses API | 通义千问 DashScope |
+| Anthropic Messages | Anthropic（透传） | 百度文心、智谱 GLM |
+| OpenAI Responses API | OpenAI Chat Completions | Codex CLI → DeepSeek |
+| OpenAI Responses API | Anthropic Messages | Codex CLI → 智谱 GLM |
+
+流式 SSE 转换同样完整支持，thinking 块、text 块、tool_use 块全部正确处理。
+
+### 三、一键接管——零配置，开关即用
 
 ![Tags 配置界面 — 自定义标签和颜色](./web/src/assets/screenshots/tags.png)
 
-不需要手动配置环境变量。Model Router 管理界面点击 "Takeover"，自动写入 Claude Code 配置：
+不需要手动改环境变量。管理界面点击 "Takeover"：
+
+**Claude Code 接管**：自动写入 `~/.claude/settings.json`
 
 ```json
 {
@@ -134,47 +99,96 @@ auto → Moonshot Kimi (K2.6)
     "ANTHROPIC_BASE_URL": "http://127.0.0.1:8082/anthropic",
     "ANTHROPIC_DEFAULT_OPUS_MODEL": "opus",
     "ANTHROPIC_DEFAULT_SONNET_MODEL": "sonnet",
-    "ANTHROPIC_DEFAULT_HAIKU_MODEL": "haiku",
-    "ANTHROPIC_API_KEY": "sk-ant-placeholder-model-router"
+    "ANTHROPIC_DEFAULT_HAIKU_MODEL": "haiku"
   }
 }
 ```
 
+**Codex CLI 接管**：自动写入 `~/.codex/config.toml`
+
+```toml
+model = "gpt-5.5"
+model_provider = "model-router"
+
+[model_providers.model-router]
+name = "Model Router"
+base_url = "http://127.0.0.1:8082"
+wire_api = "responses"
+```
+
 点击 "Restore" 一键恢复原始配置，零风险。
 
-## 架构设计
+## Codex CLI 支持
 
-Model Router 是 **Tauri v2 桌面应用**，内嵌 axum HTTP 服务器：
+v0.2.0 新增了对 OpenAI Codex CLI 的支持。Codex 使用 **OpenAI Responses API** 协议（和 Claude Code 的 Anthropic Messages 完全不同），Model Router 现在可以：
+
+- 把 Codex 的 Responses API 请求转换为 OpenAI Chat 或 Anthropic Messages 格式
+- 流式 SSE 双向转换
+- 一键写入 Codex 配置文件
+
+这意味着：**同一个 Model Router 实例，同时服务 Claude Code 和 Codex CLI，共用同一套路由规则。**
+
+## 还解决了三个"坑"
+
+### 坑一：Thinking Blocks 协议变更
+
+Claude Code 2.1.x 引入 Opus 4.8 后大量使用 thinking blocks。国产 provider 不一定支持。Model Router 自动处理：
+
+- provider 返回 thinking 块 → 正确透传
+- DeepSeek 的 `reasoning_content` → 自动转换为 `thinking` 块
+- 流式中对 `block_index` 做状态机管理，防止索引错乱
+
+### 坑二：模型名反馈循环
+
+Claude Code 会"记住" provider 返回的模型名，导致下次请求绕过路由。Model Router 在返回响应前，**将 provider 的模型名替换为原始别名**：
 
 ```
-┌──────────┐     HTTP      ┌─────────────────────────────────────┐
-│ Claude   │◄────────────►│  Model Router (Tauri + axum)       │
-│ Code     │                │                                     │
-└──────────┘                │  ┌────────────┐  ┌──────────────┐  │
-                            │  │ Protocol   │  │ Tag Router   │  │
-                            │  │ Converter  │  │ Engine       │  │
-                            │  └────────────┘  └──────────────┘  │
-                            │         │               │          │
-                            └─────────┼───────────────┼──────────┘
-                                      │               │
-                              ┌───────▼───┐   ┌───────▼──────┐
-                              │ DeepSeek  │   │ Zhipu GLM   │ ...
-                              │ (OpenAI)  │   │ (Anthropic) │
-                              └───────────┘   └─────────────┘
+provider 返回: model: "glm-5.1"
+Model Router 替换: model: "opus"
+```
+
+反馈循环被彻底切断。
+
+### 坑三：协议格式不兼容
+
+Claude Code 用 Anthropic 格式，Codex 用 Responses 格式，国产模型用 OpenAI 格式——三种协议互不兼容。Model Router 的三向转换引擎解决了这个问题。
+
+## 架构
+
+```
+  Claude Code              Codex CLI
+  (Anthropic Messages)     (OpenAI Responses)
+         │                        │
+         ▼                        ▼
+  ┌──────────────────────────────────────┐
+  │         Model Router                 │
+  │  ┌────────────┐  ┌────────────────┐  │
+  │  │ Protocol   │  │ Tag Router     │  │
+  │  │ Converter  │  │ opus→GLM       │  │
+  │  │ 3-way      │  │ sonnet→DeepSeek│  │
+  │  │ transform  │  │ haiku→Flash    │  │
+  │  └────────────┘  └────────────────┘  │
+  └──────────┬──────────────┬────────────┘
+             │              │
+     ┌───────▼───┐  ┌──────▼──────┐
+     │ OpenAI    │  │ Anthropic   │
+     │ (DeepSeek,│  │ (Baidu,     │
+     │  Moonshot)│  │  Zhipu GLM) │
+     └───────────┘  └─────────────┘
 ```
 
 - **系统托盘常驻**：关闭窗口不退出，后台持续运行
 - **管理界面**：浏览器打开 `http://127.0.0.1:8082`，实时日志、配置管理
-- **零依赖部署**：构建为 macOS .app，双击即用
+- **零依赖部署**：macOS .app / Windows .exe，双击即用
 
 ## 和其他方案对比
 
-| 方案 | Thinking Blocks | 模型反馈 | 协议转换 | 一键接管 | 开源 |
-|-----|----------------|---------|---------|---------|------|
-| **降级旧版本** | ❌ 无新功能 | ❌ | ❌ | ❌ | - |
-| **手动配环境变量** | ❌ 会报错 | ❌ 反馈循环 | ❌ | ❌ | - |
-| **普通 HTTP 代理** | ⚠️ 透传 | ❌ 反馈循环 | ❌ 必须同协议 | ❌ | - |
-| **Model Router** | ✅ 自动处理 | ✅ 模型名替换 | ✅ 三向互转 | ✅ 一键切换 | ✅ MIT |
+| 方案 | 协议转换 | 标签路由 | 模型反馈 | Codex 支持 | 开源 |
+|-----|---------|---------|---------|-----------|------|
+| **手动配环境变量** | ❌ | ❌ | ❌ | ❌ | - |
+| **普通 HTTP 代理** | ❌ 必须同协议 | ❌ | ❌ | ❌ | - |
+| **降级旧版本** | ❌ | ❌ | ❌ | ❌ | - |
+| **Model Router** | ✅ 三向互转 | ✅ opus/sonnet/haiku | ✅ 自动替换 | ✅ | ✅ MIT |
 
 ## 快速上手
 
@@ -184,27 +198,27 @@ Model Router 是 **Tauri v2 桌面应用**，内嵌 axum HTTP 服务器：
 
 | 平台 | 安装包 | 说明 |
 |------|--------|------|
-| **Windows** | `ModelRouter_x64-setup.exe` | NSIS 安装器，双击安装 |
-| **Windows** | `ModelRouter_x64.msi` | MSI 安装包 |
-| **macOS** | `ModelRouter_x64.dmg` | 拖到 Applications 即可 |
-| **Linux** | `ModelRouter_x86_64.AppImage` | 下载后 `chmod +x` 运行 |
-| **Linux** | `model-router_x64.deb` | Debian/Ubuntu 安装包 |
-
-下载后直接安装运行，不需要安装 Rust 或其他依赖。
+| **macOS** | `Model Router_aarch64.dmg` | Apple Silicon，拖到 Applications |
+| **Windows** | `ModelRouter_x64-setup.exe` | 双击安装 |
+| **Linux** | `ModelRouter_x86_64.AppImage` | `chmod +x` 运行 |
 
 ### 方式二：源码编译
 
 ```bash
 git clone https://github.com/yinnho/model-router
+cd model-router
+npm --prefix web install
 npm --prefix web run tauri dev     # 开发模式
 npm --prefix web run tauri build   # 构建安装包
 ```
 
-安装后，编辑 `~/.model-router/config.yaml` 配置你的 provider 和路由规则，然后在管理界面点 "Takeover" 接管 Claude Code——完成。
+### 配置
+
+安装后编辑 `~/.model-router/config.yaml`，配置你的 provider 和路由规则，然后在管理界面点击 "Takeover"——完成。
 
 ## 写在最后
 
-Model Router 解决的是一个具体的痛点：**Claude Code 很强，但它只原生支持 Anthropic 生态。通过 Model Router，你可以把任何兼容的 API 接到 Claude Code 上，同时享受新版本的所有特性。**
+Model Router 的核心理念很简单：**Claude Code 的智能调度很好，但不一定要用 Anthropic 的模型来执行。** 把 opus/sonnet/haiku 的调度能力，和国产模型的性价比结合起来——这就是 Model Router 做的事。
 
 不需要降级。不需要折腾环境变量。不需要担心协议不兼容。
 
