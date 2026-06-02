@@ -67,6 +67,32 @@ fn resolve_tag_from_model(model: &str) -> Option<String> {
         return Some("haiku".to_string());
     }
 
+    // Codex model name → tag mapping.
+    // Codex CLI uses OpenAI Responses API with bundled model names (gpt-5.5,
+    // gpt-5.4, etc.) for proper metadata (tool parallelization, reasoning
+    // summaries, truncation).  We map these to opus/sonnet/haiku tiers so
+    // both Claude Code and Codex share the same tag-based routing rules.
+    //
+    // gpt-5.5  — Codex's flagship model, strongest reasoning  → opus
+    // gpt-5.4  — balanced performance                          → sonnet
+    // gpt-5.3-codex — older but capable coding model           → sonnet
+    // gpt-5.4-mini — lightweight, fast, cheap                  → haiku
+    // gpt-5.2  — oldest, most economical                       → haiku
+    if parts.contains(&"gpt") {
+        // Count occurrences of "5" to distinguish gpt-5.5 from gpt-5.4 etc.
+        if parts.iter().filter(|p| **p == "5").count() >= 2 {
+            return Some("opus".to_string());   // gpt-5.5
+        }
+        if parts.contains(&"mini") {
+            return Some("haiku".to_string());  // gpt-5.4-mini
+        }
+        if parts.contains(&"2") {
+            return Some("haiku".to_string());  // gpt-5.2
+        }
+        // gpt-5.4, gpt-5.3-codex, gpt-5.3 → sonnet
+        return Some("sonnet".to_string());
+    }
+
     // Provider-specific heuristics — only applied when no explicit tag.
     // These are opinionated quality-to-tag mappings and can be overridden
     // by setting ANTHROPIC_DEFAULT_*_MODEL to an explicit tag name.
@@ -1253,5 +1279,38 @@ mod tests {
         });
         strip_thinking(&mut body);
         assert_eq!(body["messages"][0]["content"], "plain text response");
+    }
+
+    #[test]
+    fn test_resolve_tag_codex_models() {
+        // Codex model name → tag mapping
+        assert_eq!(resolve_tag_from_model("gpt-5.5"), Some("opus".to_string()));
+        assert_eq!(resolve_tag_from_model("gpt-5.4"), Some("sonnet".to_string()));
+        assert_eq!(resolve_tag_from_model("gpt-5.3-codex"), Some("sonnet".to_string()));
+        assert_eq!(resolve_tag_from_model("gpt-5.4-mini"), Some("haiku".to_string()));
+        assert_eq!(resolve_tag_from_model("gpt-5.2"), Some("haiku".to_string()));
+    }
+
+    #[test]
+    fn test_resolve_tag_direct_matches() {
+        // Direct tag name matches
+        assert_eq!(resolve_tag_from_model("opus"), Some("opus".to_string()));
+        assert_eq!(resolve_tag_from_model("sonnet"), Some("sonnet".to_string()));
+        assert_eq!(resolve_tag_from_model("haiku"), Some("haiku".to_string()));
+        assert_eq!(resolve_tag_from_model("auto"), None);
+    }
+
+    #[test]
+    fn test_resolve_tag_provider_heuristics() {
+        assert_eq!(resolve_tag_from_model("glm-5.1"), Some("sonnet".to_string()));
+        assert_eq!(resolve_tag_from_model("deepseek-v4-pro"), Some("haiku".to_string()));
+        assert_eq!(resolve_tag_from_model("k2.6"), Some("sonnet".to_string()));
+    }
+
+    #[test]
+    fn test_resolve_tag_unknown() {
+        // Unknown model names should return None (falls back to current_tag)
+        assert_eq!(resolve_tag_from_model("some-random-model"), None);
+        assert_eq!(resolve_tag_from_model(""), None);
     }
 }
