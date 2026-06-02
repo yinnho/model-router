@@ -16,6 +16,8 @@ pub fn run() {
 
     let result = tauri::Builder::default()
         .plugin(tauri_plugin_shell::init())
+        .plugin(tauri_plugin_updater::Builder::new().build())
+        .plugin(tauri_plugin_process::init())
         .setup(|app| {
             // 1. Load config
             let app_config = load_config().map_err(|e| e.to_string())?;

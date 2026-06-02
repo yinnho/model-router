@@ -1,6 +1,8 @@
 import { useState, useEffect, useCallback, useRef } from 'react';
 import type { AppConfig, Status } from './lib/api';
 import * as api from './lib/api';
+import { checkForUpdate, installUpdate } from './lib/updater';
+import type { UpdateInfo } from './lib/updater';
 import { ProvidersPage } from './pages/ProvidersPage';
 import { RoutesPage } from './pages/RoutesPage';
 import { TagsPage } from './pages/TagsPage';
@@ -21,6 +23,8 @@ function App() {
   const [status, setStatus] = useState<Status | null>(null);
   const [tab, setTab] = useState<Tab>('logs');
   const [error, setError] = useState<string | null>(null);
+  const [updateInfo, setUpdateInfo] = useState<UpdateInfo | null>(null);
+  const [updating, setUpdating] = useState(false);
 
   const showError = useCallback((msg: string) => {
     setError(msg);
@@ -74,7 +78,12 @@ function App() {
     }
   }, [refresh, showError]);
 
-  useEffect(() => { refresh(); }, [refresh]);
+  useEffect(() => {
+    refresh();
+    checkForUpdate().then(info => {
+      if (info) setUpdateInfo(info);
+    });
+  }, [refresh]);
 
   if (!config || !status) {
     return (
@@ -171,6 +180,52 @@ function App() {
           </div>
         </div>
       </div>
+
+      {/* Update notification */}
+      {updateInfo && !updating && (
+        <div style={{
+          padding: '8px 14px', marginBottom: 12, borderRadius: 'var(--radius-md)',
+          background: 'rgba(34,197,94,0.1)', border: '1px solid rgba(34,197,94,0.2)',
+          fontSize: 13, display: 'flex', alignItems: 'center', gap: 12,
+        }}>
+          <span style={{ fontSize: 14, flexShrink: 0 }}>↑</span>
+          <span style={{ flex: 1 }}>
+            New version <strong>v{updateInfo.version}</strong> available
+          </span>
+          <button
+            onClick={async () => {
+              setUpdating(true);
+              try {
+                await installUpdate(updateInfo);
+              } catch (e) {
+                setUpdating(false);
+                setUpdateInfo(null);
+                showError(e instanceof Error ? e.message : 'Update failed');
+              }
+            }}
+            style={{
+              background: 'var(--success)', color: '#fff', border: 'none',
+              borderRadius: 'var(--radius-sm)', padding: '4px 14px',
+              fontSize: 12, cursor: 'pointer', fontWeight: 600,
+            }}
+          >Update</button>
+          <span
+            onClick={() => setUpdateInfo(null)}
+            style={{ cursor: 'pointer', opacity: 0.5, fontSize: 14, flexShrink: 0 }}
+          >x</span>
+        </div>
+      )}
+
+      {updating && (
+        <div style={{
+          padding: '8px 14px', marginBottom: 12, borderRadius: 'var(--radius-md)',
+          background: 'rgba(59,130,246,0.1)', border: '1px solid rgba(59,130,246,0.2)',
+          color: 'var(--accent)', fontSize: 13, display: 'flex', alignItems: 'center', gap: 8,
+        }}>
+          <span style={{ width: 14, height: 14, border: '2px solid var(--accent)', borderTopColor: 'transparent', borderRadius: '50%', animation: 'spin 0.8s linear infinite', display: 'inline-block' }} />
+          Downloading update...
+        </div>
+      )}
 
       {/* Error display */}
       {error && (

@@ -31,6 +31,8 @@ rust-embed = { version = "8", features = ["mime-guess"] }
 # Tauri dependencies
 tauri = { version = "2", features = ["tray-icon"] }
 tauri-plugin-shell = "2"
+tauri-plugin-updater = "2"
+tauri-plugin-process = "2"
 
 [build-dependencies]
 tauri-build = { version = "2", features = [] }
