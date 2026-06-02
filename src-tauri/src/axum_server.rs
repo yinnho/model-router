@@ -80,6 +80,8 @@ pub async fn start(state: AppState) -> u16 {
                 .route("/takeover/codex", axum::routing::post(crate::api::takeover_codex_handler))
                 .route("/takeover/codex", axum::routing::delete(crate::api::restore_codex_handler))
                 .route("/test", axum::routing::post(crate::api::test_route_handler))
+                .route("/config/export", axum::routing::post(crate::api::export_config))
+                .route("/config/import", axum::routing::post(crate::api::import_config))
                 .route_layer(axum::middleware::from_fn_with_state(
                     state.clone(),
                     crate::api::require_management_key,

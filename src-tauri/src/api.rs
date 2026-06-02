@@ -246,6 +246,39 @@ pub async fn restore_codex_handler() -> Result<StatusCode, ApiError> {
     Ok(StatusCode::OK)
 }
 
+// POST /api/config/export
+pub async fn export_config(
+    State(state): State<AppState>,
+) -> Result<Json<serde_json::Value>, ApiError> {
+    let config = state.config.read().await;
+    let mut export_config = config.clone();
+    // Replace real management_key with placeholder for security
+    export_config.management_key = "YOUR_MANAGEMENT_KEY".to_string();
+    let json_value =
+        serde_json::to_value(&export_config).map_err(|e| ApiError::Internal(e.to_string()))?;
+    Ok(Json(json_value))
+}
+
+// POST /api/config/import
+pub async fn import_config(
+    State(state): State<AppState>,
+    Json(mut import_config): Json<AppConfig>,
+) -> Result<StatusCode, ApiError> {
+    // Validate the imported config
+    validate_config(&import_config).map_err(ApiError::Validation)?;
+
+    // If the imported management_key is the placeholder, preserve the existing key
+    if import_config.management_key == "YOUR_MANAGEMENT_KEY" {
+        let current = state.config.read().await;
+        import_config.management_key = current.management_key.clone();
+    }
+
+    save_config(&import_config).map_err(ApiError::from)?;
+    let mut config = state.config.write().await;
+    *config = import_config;
+    Ok(StatusCode::OK)
+}
+
 #[derive(Debug, thiserror::Error)]
 pub enum ApiError {
     #[error("{0}")]

@@ -124,6 +124,30 @@ export async function restoreCodex(): Promise<void> {
   });
 }
 
+export async function exportConfig(): Promise<AppConfig> {
+  const res = await fetch(`${API_BASE}/config/export`, {
+    method: 'POST',
+    headers: { ...authHeaders() },
+  });
+  if (!res.ok) {
+    const body = await res.json().catch(() => ({}));
+    throw new Error(body.error || 'Export failed');
+  }
+  return res.json();
+}
+
+export async function importConfig(config: AppConfig): Promise<void> {
+  const res = await fetch(`${API_BASE}/config/import`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json', ...authHeaders() },
+    body: JSON.stringify(config),
+  });
+  if (!res.ok) {
+    const body = await res.json().catch(() => ({}));
+    throw new Error(body.error || 'Import failed');
+  }
+}
+
 export async function getLogs(): Promise<RequestLog[]> {
   const res = await fetch(`${API_BASE}/logs`);
   return res.json();

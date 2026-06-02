@@ -1,4 +1,4 @@
-import { useState, useEffect, useCallback } from 'react';
+import { useState, useEffect, useCallback, useRef } from 'react';
 import type { AppConfig, Status } from './lib/api';
 import * as api from './lib/api';
 import { ProvidersPage } from './pages/ProvidersPage';
@@ -32,6 +32,47 @@ function App() {
     setConfig(c);
     setStatus(s);
   }, []);
+
+  const fileInputRef = useRef<HTMLInputElement>(null);
+
+  const handleExport = useCallback(async () => {
+    try {
+      const exportData = await api.exportConfig();
+      const json = JSON.stringify(exportData, null, 2);
+      const blob = new Blob([json], { type: 'application/json' });
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement('a');
+      a.href = url;
+      a.download = 'model-router-config.json';
+      document.body.appendChild(a);
+      a.click();
+      document.body.removeChild(a);
+      URL.revokeObjectURL(url);
+    } catch (e) {
+      showError(e instanceof Error ? e.message : 'Export failed');
+    }
+  }, [showError]);
+
+  const handleImport = useCallback(() => {
+    fileInputRef.current?.click();
+  }, []);
+
+  const handleFileSelected = useCallback(async (e: React.ChangeEvent<HTMLInputElement>) => {
+    const file = e.target.files?.[0];
+    if (!file) return;
+    try {
+      const text = await file.text();
+      const importedConfig = JSON.parse(text) as AppConfig;
+      await api.importConfig(importedConfig);
+      await refresh();
+    } catch (e) {
+      showError(e instanceof Error ? e.message : 'Import failed');
+    } finally {
+      if (fileInputRef.current) {
+        fileInputRef.current.value = '';
+      }
+    }
+  }, [refresh, showError]);
 
   useEffect(() => { refresh(); }, [refresh]);
 
@@ -79,6 +120,14 @@ function App() {
 
   return (
     <div style={{ maxWidth: 960, margin: '0 auto', padding: '20px 24px', minHeight: '100vh' }}>
+      {/* Hidden file input for import */}
+      <input
+        ref={fileInputRef}
+        type="file"
+        accept=".json"
+        style={{ display: 'none' }}
+        onChange={handleFileSelected}
+      />
       {/* Header */}
       <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 20 }}>
         <div style={{ display: 'flex', alignItems: 'center', gap: 10 }}>
@@ -94,6 +143,24 @@ function App() {
           </div>
         </div>
         <div style={{ display: 'flex', alignItems: 'center', gap: 12 }}>
+          <div style={{ display: 'flex', gap: 6 }}>
+            <button
+              onClick={handleImport}
+              style={{
+                background: 'transparent', color: 'var(--text-secondary)',
+                border: '1px solid var(--border)', borderRadius: 'var(--radius-sm)',
+                padding: '4px 10px', fontSize: 12, cursor: 'pointer', fontWeight: 500,
+              }}
+            >Import</button>
+            <button
+              onClick={handleExport}
+              style={{
+                background: 'transparent', color: 'var(--text-secondary)',
+                border: '1px solid var(--border)', borderRadius: 'var(--radius-sm)',
+                padding: '4px 10px', fontSize: 12, cursor: 'pointer', fontWeight: 500,
+              }}
+            >Export</button>
+          </div>
           <div style={{ display: 'flex', alignItems: 'center', gap: 4 }}>
             <StatusDot active={status.takeover.active} />
             <span style={{ fontSize: 11, color: 'var(--text-muted)', fontFamily: 'monospace' }}>Claude</span>
