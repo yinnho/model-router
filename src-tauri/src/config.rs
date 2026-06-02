@@ -176,13 +176,46 @@ pub fn load_config() -> Result<AppConfig> {
     let path = config_path()?;
     log::info!("[Config] loading config from {}", path.display());
     if !path.exists() {
-        log::info!("[Config] config file not found, using defaults");
-        return Ok(AppConfig::default());
+        log::info!("[Config] config file not found, creating with defaults");
+        let config = AppConfig::default();
+        // Persist defaults so the user can see and edit them
+        if let Err(e) = save_config(&config) {
+            log::warn!("[Config] failed to save default config: {}", e);
+        }
+        return Ok(config);
     }
     let content = std::fs::read_to_string(&path)
         .with_context(|| format!("reading {}", path.display()))?;
-    let config: AppConfig = serde_yaml::from_str(&content)
+    let mut config: AppConfig = serde_yaml::from_str(&content)
         .with_context(|| format!("parsing {}", path.display()))?;
+
+    // Backfill defaults for empty fields (e.g. user upgraded from an older
+    // version that had explicit empty arrays).  Serde defaults only apply
+    // when a field is *missing*, not when it's present-but-empty.
+    let mut dirty = false;
+    if config.providers.is_empty() {
+        config.providers = default_providers();
+        dirty = true;
+    }
+    if config.routes.is_empty() {
+        config.routes = default_routes();
+        dirty = true;
+    }
+    if config.tags.is_empty() {
+        config.tags = default_tags();
+        dirty = true;
+    }
+    if config.management_key.is_empty() {
+        config.management_key = default_management_key();
+        dirty = true;
+    }
+    if dirty {
+        log::info!("[Config] backfilling empty fields with defaults");
+        if let Err(e) = save_config(&config) {
+            log::warn!("[Config] failed to save backfilled config: {}", e);
+        }
+    }
+
     log::info!("[Config] loaded current_tag={}", config.current_tag);
     Ok(config)
 }
