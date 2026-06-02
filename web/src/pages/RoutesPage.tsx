@@ -164,7 +164,7 @@ function RouteForm({ initial, providers, tags, onSave, onCancel }: {
   const [model, setModel] = useState(initial?.model || '');
   const [provider, setProvider] = useState(initial?.provider || providers[0] || '');
   const [selectedTags, setSelectedTags] = useState<string[]>(initial?.tags || []);
-  const [format, setFormat] = useState<'openai' | 'anthropic'>(initial?.format || 'openai');
+  const [format, setFormat] = useState<'openai' | 'anthropic' | 'openai_responses'>(initial?.format || 'openai');
 
   const toggleTag = (tag: string) => {
     setSelectedTags(prev => prev.includes(tag) ? prev.filter(t => t !== tag) : [...prev, tag]);
@@ -180,9 +180,10 @@ function RouteForm({ initial, providers, tags, onSave, onCancel }: {
         <Select label="Provider" value={provider} onChange={e => setProvider(e.target.value)}>
           {providers.map(p => <option key={p} value={p}>{p}</option>)}
         </Select>
-        <Select label="Format" value={format} onChange={e => setFormat(e.target.value as 'openai' | 'anthropic')}>
+        <Select label="Format" value={format} onChange={e => setFormat(e.target.value as 'openai' | 'anthropic' | 'openai_responses')}>
           <option value="openai">OpenAI</option>
           <option value="anthropic">Anthropic</option>
+          <option value="openai_responses">OpenAI Responses</option>
         </Select>
         <div style={{ gridColumn: '1 / -1' }}>
           <label style={{ display: 'block', fontSize: 12, color: 'var(--text-secondary)', marginBottom: 6, fontWeight: 500 }}>Tags</label>
