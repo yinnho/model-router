@@ -4,70 +4,85 @@ providers:
   deepseek:
     name: DeepSeek
     base_url: https://api.deepseek.com
-    api_key: sk-your-deepseek-key
+    api_key: your-deepseek-key
     auth_type: bearer
-
+  deepseek_anthropic:
+    name: DeepSeek (Anthropic)
+    base_url: https://api.deepseek.com/anthropic
+    api_key: your-deepseek-key
+    auth_type: bearer
   zhipu:
     name: Zhipu GLM
-    base_url: https://open.bigmodel.cn
+    base_url: https://open.bigmodel.cn/api/anthropic
     api_key: your-zhipu-key
     auth_type: bearer
-
-  moonshot:
-    name: Moonshot (Kimi)
-    base_url: https://api.moonshot.cn
-    api_key: your-moonshot-key
+  baidu:
+    name: Baidu ERNIE
+    base_url: https://qianfan.baidubce.com/anthropic/coding
+    api_key: your-baidu-key
     auth_type: bearer
-
-  siliconflow:
-    name: SiliconFlow
-    base_url: https://api.siliconflow.cn
-    api_key: your-siliconflow-key
+  kimi:
+    name: Kimi
+    base_url: https://api.kimi.com/coding
+    api_key: your-kimi-key
     auth_type: bearer
-
   dashscope:
     name: Qwen (DashScope)
-    base_url: https://dashscope.aliyuncs.com/compatible-mode
+    base_url: https://dashscope.aliyuncs.com/compatible-mode/v1
     api_key: your-dashscope-key
     auth_type: bearer
-
   minimax:
-    name: Minimax
-    base_url: https://api.minimax.chat
+    name: MiniMax
+    base_url: https://api.minimaxi.com/anthropic
     api_key: your-minimax-key
     auth_type: bearer
 
 routes:
-  # opus → Anthropic format providers (passthrough)
-  - endpoint: /api/anthropic/v1/messages
-    model: glm-5.1
-    provider: zhipu
-    format: anthropic
-    tags: [opus]
-
-  # sonnet → OpenAI format providers
   - endpoint: /v1/chat/completions
     model: deepseek-v4-pro
     provider: deepseek
+    tags: [sonnet, auto]
     format: openai
-    tags: [auto, sonnet]
 
-  # haiku → lighter/faster models
   - endpoint: /v1/chat/completions
     model: deepseek-v4-flash
     provider: deepseek
-    format: openai
     tags: [haiku]
+    format: openai
+
+  - endpoint: /v1/messages
+    model: glm-5.1
+    provider: zhipu
+    tags: [opus]
+    format: anthropic
+
+  - endpoint: /v1/chat/completions
+    model: qwen3.7-max
+    provider: dashscope
+    tags: [sonnet]
+    format: openai
+
+  - endpoint: /v1/messages
+    model: K2.6
+    provider: kimi
+    tags: [sonnet]
+    format: anthropic
+
+  - endpoint: /v1/messages
+    model: MiniMax-M3
+    provider: minimax
+    tags: [haiku]
+    format: anthropic
 
 tags:
-  - name: haiku
-    color: "#22C55E"
+  - name: opus
+    color: "#A855F7"
 
   - name: sonnet
     color: "#3B82F6"
 
-  - name: opus
-    color: "#A855F7"
+  - name: haiku
+    color: "#22C55E"
 
   - name: auto
     color: "#F59E0B"

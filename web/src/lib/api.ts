@@ -12,7 +12,7 @@ export interface Route {
   model: string;
   provider: string;
   tags: string[];
-  format: 'openai' | 'anthropic';
+  format: 'openai' | 'anthropic' | 'openai_responses';
 }
 
 export interface Tag {
