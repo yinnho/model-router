@@ -25,6 +25,7 @@ function App() {
   const [error, setError] = useState<string | null>(null);
   const [updateInfo, setUpdateInfo] = useState<UpdateInfo | null>(null);
   const [updating, setUpdating] = useState(false);
+  const [checkingUpdate, setCheckingUpdate] = useState(false);
 
   const showError = useCallback((msg: string) => {
     setError(msg);
@@ -77,6 +78,21 @@ function App() {
       }
     }
   }, [refresh, showError]);
+
+  const handleCheckUpdate = useCallback(async () => {
+    setCheckingUpdate(true);
+    try {
+      const info = await checkForUpdate();
+      if (info) {
+        setUpdateInfo(info);
+      } else {
+        showError('Already up to date');
+      }
+    } catch {
+      showError('Update check failed');
+    }
+    setCheckingUpdate(false);
+  }, [showError]);
 
   useEffect(() => {
     refresh();
@@ -152,6 +168,16 @@ function App() {
           </div>
         </div>
         <div style={{ display: 'flex', alignItems: 'center', gap: 12 }}>
+          <button
+            onClick={handleCheckUpdate}
+            disabled={checkingUpdate}
+            style={{
+              background: 'transparent', color: 'var(--text-secondary)',
+              border: '1px solid var(--border)', borderRadius: 'var(--radius-sm)',
+              padding: '4px 10px', fontSize: 12, cursor: checkingUpdate ? 'default' : 'pointer', fontWeight: 500,
+              opacity: checkingUpdate ? 0.5 : 1,
+            }}
+          >{checkingUpdate ? '⏳ Checking...' : '↑ Update'}</button>
           <div style={{ display: 'flex', gap: 6 }}>
             <button
               onClick={handleImport}
