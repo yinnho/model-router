@@ -182,7 +182,7 @@ async fn parse_body(body: Body) -> Result<Value, ProxyError> {
 fn find_candidate_routes<'a>(routes: &'a [Route], tag: &str) -> Vec<&'a Route> {
     let exact: Vec<&Route> = routes
         .iter()
-        .filter(|r| r.enabled && r.tags.contains(&tag.to_string()))
+        .filter(|r| r.enabled && r.tags.iter().any(|t| t == tag))
         .collect();
     if !exact.is_empty() {
         return exact;
@@ -282,20 +282,20 @@ async fn handle_proxy(
         let provider = match config.providers.get(&route.provider) {
             Some(p) => p,
             None => {
-                let err = ProxyError::NoProvider(route.provider.clone());
-                if is_retryable(&err) { last_error = Some(err); continue; }
-                return Err(err);
+                log::warn!("[Proxy] route references unknown provider '{}', skipping", route.provider);
+                last_error = Some(ProxyError::NoProvider(route.provider.clone()));
+                continue;
             }
         };
 
         // 3. Validate provider API key
         if provider.api_key.is_empty() || provider.api_key.starts_with("sk-your-") {
-            let err = ProxyError::NoProvider(format!(
+            log::warn!("[Proxy] provider '{}' has no valid API key, skipping", route.provider);
+            last_error = Some(ProxyError::NoProvider(format!(
                 "provider '{}' has no valid API key configured",
                 route.provider
-            ));
-            if is_retryable(&err) { last_error = Some(err); continue; }
-            return Err(err);
+            )));
+            continue;
         }
 
     log::info!(
@@ -760,19 +760,19 @@ async fn handle_count_tokens(
         let provider = match config.providers.get(&route.provider) {
             Some(p) => p,
             None => {
-                let err = ProxyError::NoProvider(route.provider.clone());
-                if is_retryable(&err) { last_error = Some(err); continue; }
-                return Err(err);
+                log::warn!("[Proxy] count_tokens route references unknown provider '{}', skipping", route.provider);
+                last_error = Some(ProxyError::NoProvider(route.provider.clone()));
+                continue;
             }
         };
 
     if provider.api_key.is_empty() || provider.api_key.starts_with("sk-your-") {
-        let err = ProxyError::NoProvider(format!(
+        log::warn!("[Proxy] count_tokens provider '{}' has no valid API key, skipping", route.provider);
+        last_error = Some(ProxyError::NoProvider(format!(
             "provider '{}' has no valid API key configured",
             route.provider
-        ));
-        if is_retryable(&err) { last_error = Some(err); continue; }
-        return Err(err);
+        )));
+        continue;
     }
 
     log::info!(
