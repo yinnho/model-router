@@ -9,8 +9,8 @@ import { Input, Select } from '../components/Input';
 export function RoutesPage({ config, onConfigChange }: { config: AppConfig; onConfigChange: (c: AppConfig) => void }) {
   const [editing, setEditing] = useState<number | null>(null);
   const [adding, setAdding] = useState(false);
-  const [testResults, setTestResults] = useState<Record<string, TestResult>>({});
-  const [testing, setTesting] = useState<string | null>(null);
+  const [testResults, setTestResults] = useState<Record<number, TestResult>>({});
+  const [testing, setTesting] = useState<number | null>(null);
 
   const handleDelete = async (index: number) => {
     const newRoutes = config.routes.filter((_, i) => i !== index);
@@ -19,13 +19,13 @@ export function RoutesPage({ config, onConfigChange }: { config: AppConfig; onCo
     onConfigChange(newConfig);
   };
 
-  const handleTest = async (tag: string) => {
-    setTesting(tag);
+  const handleTest = async (index: number, tag: string) => {
+    setTesting(index);
     try {
       const result = await api.testRoute(tag);
-      setTestResults(prev => ({ ...prev, [tag]: result }));
+      setTestResults(prev => ({ ...prev, [index]: result }));
     } catch (e: any) {
-      setTestResults(prev => ({ ...prev, [tag]: { success: false, tag, provider: '', model: '', format: '', latency_ms: 0, error: e.message, response: null } }));
+      setTestResults(prev => ({ ...prev, [index]: { success: false, tag, provider: '', model: '', format: '', latency_ms: 0, error: e.message, response: null } }));
     }
     setTesting(null);
   };
@@ -59,7 +59,7 @@ export function RoutesPage({ config, onConfigChange }: { config: AppConfig; onCo
       <div style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
         {config.routes.map((route, i) => {
           const tag = route.tags[0] || '';
-          const tr = testResults[tag];
+          const tr = testResults[i];
           return (
             <Card key={i}>
               <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start' }}>
@@ -81,12 +81,12 @@ export function RoutesPage({ config, onConfigChange }: { config: AppConfig; onCo
                 </div>
                 <div style={{ display: 'flex', gap: 4, alignItems: 'center' }}>
                   <Button
-                    variant={testing === tag ? 'secondary' : 'success'}
-                    onClick={() => handleTest(tag)}
-                    disabled={!!testing}
+                    variant={testing === i ? 'secondary' : 'success'}
+                    onClick={() => handleTest(i, tag)}
+                    disabled={testing !== null}
                     style={{ fontSize: 12, padding: '4px 12px' }}
                   >
-                    {testing === tag ? '⏳ Testing...' : '▶ Test'}
+                    {testing === i ? '⏳ Testing...' : '▶ Test'}
                   </Button>
                   <Button variant="ghost" onClick={() => setEditing(i)} style={{ fontSize: 12, padding: '4px 10px' }}>Edit</Button>
                   <Button variant="danger" onClick={() => handleDelete(i)} style={{ fontSize: 12, padding: '4px 10px' }}>Delete</Button>
