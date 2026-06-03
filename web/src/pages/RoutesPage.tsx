@@ -6,6 +6,12 @@ import { Card } from '../components/Card';
 import { Badge } from '../components/Badge';
 import { Input, Select } from '../components/Input';
 
+const FORMAT_ENDPOINTS: Record<string, string> = {
+  openai: '/v1/chat/completions',
+  anthropic: '/v1/messages',
+  openai_responses: '/v1/responses',
+};
+
 export function RoutesPage({ config, onConfigChange }: { config: AppConfig; onConfigChange: (c: AppConfig) => void }) {
   const [editing, setEditing] = useState<number | null>(null);
   const [adding, setAdding] = useState(false);
@@ -28,6 +34,25 @@ export function RoutesPage({ config, onConfigChange }: { config: AppConfig; onCo
       setTestResults(prev => ({ ...prev, [index]: { success: false, tag, provider: '', model: '', format: '', latency_ms: 0, error: e.message, response: null } }));
     }
     setTesting(null);
+  };
+
+  const handleToggleEnabled = async (index: number) => {
+    const newRoutes = config.routes.map((r, i) =>
+      i === index ? { ...r, enabled: !r.enabled } : r
+    );
+    const newConfig = { ...config, routes: newRoutes };
+    await api.updateConfig(newConfig);
+    onConfigChange(newConfig);
+  };
+
+  const handleMove = async (index: number, direction: -1 | 1) => {
+    const target = index + direction;
+    if (target < 0 || target >= config.routes.length) return;
+    const newRoutes = [...config.routes];
+    [newRoutes[index], newRoutes[target]] = [newRoutes[target], newRoutes[index]];
+    const newConfig = { ...config, routes: newRoutes };
+    await api.updateConfig(newConfig);
+    onConfigChange(newConfig);
   };
 
   return (
@@ -61,29 +86,73 @@ export function RoutesPage({ config, onConfigChange }: { config: AppConfig; onCo
           const tag = route.tags[0] || '';
           const tr = testResults[i];
           return (
-            <Card key={i}>
+            <Card key={i} style={{ opacity: route.enabled ? 1 : 0.45, transition: 'opacity 0.2s' }}>
               <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start' }}>
-                <div style={{ flex: 1 }}>
-                  <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
-                    <span style={{ fontSize: 15, fontWeight: 600 }}>{route.model}</span>
-                    <Badge color={route.format === 'openai' ? '#10a37f' : '#d97706'}>{route.format || 'openai'}</Badge>
+                <div style={{ display: 'flex', gap: 8, alignItems: 'flex-start' }}>
+                  {/* Ordering buttons */}
+                  <div style={{ display: 'flex', flexDirection: 'column', gap: 2, marginTop: 2 }}>
+                    <button
+                      disabled={i === 0}
+                      onClick={() => handleMove(i, -1)}
+                      style={{
+                        background: 'transparent', border: 'none', color: 'var(--text-muted)',
+                        cursor: i === 0 ? 'default' : 'pointer', fontSize: 10, padding: 2,
+                        opacity: i === 0 ? 0.3 : 1, lineHeight: 1,
+                      }}
+                      title="Move up"
+                    >▲</button>
+                    <button
+                      disabled={i === config.routes.length - 1}
+                      onClick={() => handleMove(i, 1)}
+                      style={{
+                        background: 'transparent', border: 'none', color: 'var(--text-muted)',
+                        cursor: i === config.routes.length - 1 ? 'default' : 'pointer', fontSize: 10, padding: 2,
+                        opacity: i === config.routes.length - 1 ? 0.3 : 1, lineHeight: 1,
+                      }}
+                      title="Move down"
+                    >▼</button>
                   </div>
-                  <div style={{ fontSize: 12, color: 'var(--text-muted)', marginTop: 4 }}>
-                    via <span style={{ color: 'var(--text-secondary)' }}>{route.provider}</span>
-                    <span className="mono" style={{ marginLeft: 8 }}>{route.endpoint}</span>
-                  </div>
-                  <div style={{ display: 'flex', gap: 4, marginTop: 8 }}>
-                    {route.tags.map(t => {
-                      const tagDef = config.tags.find(td => td.name === t);
-                      return <Badge key={t} color={tagDef?.color || '#555'}>{t}</Badge>;
-                    })}
+                  {/* Route info */}
+                  <div>
+                    <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+                      <span style={{ fontSize: 15, fontWeight: 600 }}>{route.model}</span>
+                      <Badge color={route.format === 'openai' ? '#10a37f' : route.format === 'openai_responses' ? '#6366f1' : '#d97706'}>{route.format || 'openai'}</Badge>
+                    </div>
+                    <div style={{ fontSize: 12, color: 'var(--text-muted)', marginTop: 4 }}>
+                      via <span style={{ color: 'var(--text-secondary)' }}>{route.provider}</span>
+                      <span className="mono" style={{ marginLeft: 8 }}>{route.endpoint}</span>
+                    </div>
+                    <div style={{ display: 'flex', gap: 4, marginTop: 8 }}>
+                      {route.tags.map(t => {
+                        const tagDef = config.tags.find(td => td.name === t);
+                        return <Badge key={t} color={tagDef?.color || '#555'}>{t}</Badge>;
+                      })}
+                    </div>
                   </div>
                 </div>
-                <div style={{ display: 'flex', gap: 4, alignItems: 'center' }}>
+                <div style={{ display: 'flex', gap: 6, alignItems: 'center' }}>
+                  {/* Enable/disable toggle */}
+                  <div
+                    onClick={() => handleToggleEnabled(i)}
+                    title={route.enabled ? 'Disable route' : 'Enable route'}
+                    style={{
+                      width: 36, height: 20, borderRadius: 10, cursor: 'pointer',
+                      background: route.enabled ? 'var(--success)' : '#444',
+                      position: 'relative', transition: 'background 0.2s',
+                    }}
+                  >
+                    <div style={{
+                      width: 16, height: 16, borderRadius: 8,
+                      background: '#fff', position: 'absolute', top: 2,
+                      left: route.enabled ? 18 : 2,
+                      transition: 'left 0.2s',
+                      boxShadow: '0 1px 3px rgba(0,0,0,0.3)',
+                    }} />
+                  </div>
                   <Button
                     variant={testing === i ? 'secondary' : 'success'}
                     onClick={() => handleTest(i, tag)}
-                    disabled={testing !== null}
+                    disabled={testing !== null || !route.enabled}
                     style={{ fontSize: 12, padding: '4px 12px' }}
                   >
                     {testing === i ? '⏳ Testing...' : '▶ Test'}
@@ -138,15 +207,15 @@ export function RoutesPage({ config, onConfigChange }: { config: AppConfig; onCo
         <h3 style={{ margin: '0 0 8px 0', fontSize: 12, color: 'var(--text-muted)', fontWeight: 500, textTransform: 'uppercase', letterSpacing: '0.5px' }}>curl test commands</h3>
         <pre className="mono" style={{ fontSize: 11, color: 'var(--text-secondary)', whiteSpace: 'pre-wrap', lineHeight: 1.7 }}>
 {`# Test a specific route
-curl -s http://127.0.0.1:${config.port}/api/test \\
-  -H 'Content-Type: application/json' \\
-  -d '{"tag":"haiku","prompt":"Say hello"}' | jq .
+	curl -s http://127.0.0.1:${config.port}/api/test \\
+	  -H 'Content-Type: application/json' \\
+	  -d '{"tag":"haiku","prompt":"Say hello"}' | jq .
 
-# Test as Anthropic client
-curl -s http://127.0.0.1:${config.port}/anthropic/v1/messages \\
-  -H 'Content-Type: application/json' \\
-  -H 'x-api-key: test' \\
-  -d '{"model":"sonnet","max_tokens":64,"messages":[{"role":"user","content":"Hi"}]}' | jq .`}
+	# Test as Anthropic client
+	curl -s http://127.0.0.1:${config.port}/anthropic/v1/messages \\
+	  -H 'Content-Type: application/json' \\
+	  -H 'x-api-key: test' \\
+	  -d '{"model":"sonnet","max_tokens":64,"messages":[{"role":"user","content":"Hi"}]}' | jq .`}
         </pre>
       </Card>
     </div>
@@ -170,6 +239,11 @@ function RouteForm({ initial, providers, tags, onSave, onCancel }: {
     setSelectedTags(prev => prev.includes(tag) ? prev.filter(t => t !== tag) : [...prev, tag]);
   };
 
+  const handleFormatChange = (newFormat: 'openai' | 'anthropic' | 'openai_responses') => {
+    setFormat(newFormat);
+    setEndpoint(FORMAT_ENDPOINTS[newFormat] || '/v1/chat/completions');
+  };
+
   const valid = endpoint && model && provider && selectedTags.length > 0;
 
   return (
@@ -180,7 +254,7 @@ function RouteForm({ initial, providers, tags, onSave, onCancel }: {
         <Select label="Provider" value={provider} onChange={e => setProvider(e.target.value)}>
           {providers.map(p => <option key={p} value={p}>{p}</option>)}
         </Select>
-        <Select label="Format" value={format} onChange={e => setFormat(e.target.value as 'openai' | 'anthropic' | 'openai_responses')}>
+        <Select label="Format" value={format} onChange={e => handleFormatChange(e.target.value as 'openai' | 'anthropic' | 'openai_responses')}>
           <option value="openai">OpenAI</option>
           <option value="anthropic">Anthropic</option>
           <option value="openai_responses">OpenAI Responses</option>
@@ -202,7 +276,7 @@ function RouteForm({ initial, providers, tags, onSave, onCancel }: {
         </div>
       </div>
       <div style={{ marginTop: 14, display: 'flex', gap: 8 }}>
-        <Button variant="primary" disabled={!valid} onClick={() => onSave({ endpoint, model, provider, tags: selectedTags, format })}>Save</Button>
+        <Button variant="primary" disabled={!valid} onClick={() => onSave({ endpoint, model, provider, tags: selectedTags, format, enabled: initial?.enabled ?? true })}>Save</Button>
         <Button variant="ghost" onClick={onCancel}>Cancel</Button>
       </div>
     </Card>

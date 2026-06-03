@@ -1,4 +1,4 @@
-use crate::config::{AppState, ProviderFormat, RequestLog};
+use crate::config::{AppState, ProviderFormat, RequestLog, Route};
 use crate::convert;
 use axum::body::Body;
 use axum::extract::{Request, State};
@@ -171,6 +171,57 @@ async fn parse_body(body: Body) -> Result<Value, ProxyError> {
 }
 
 // ---------------------------------------------------------------------------
+// Route selection helpers
+// ---------------------------------------------------------------------------
+
+/// Find all candidate routes for a tag in priority order (array index).
+/// Filters out disabled routes. Three-tier fallback:
+/// 1. Exact tag match → all matching enabled routes
+/// 2. Routes tagged "auto"
+/// 3. All enabled routes as last resort
+fn find_candidate_routes<'a>(routes: &'a [Route], tag: &str) -> Vec<&'a Route> {
+    let exact: Vec<&Route> = routes
+        .iter()
+        .filter(|r| r.enabled && r.tags.contains(&tag.to_string()))
+        .collect();
+    if !exact.is_empty() {
+        return exact;
+    }
+    let auto: Vec<&Route> = routes
+        .iter()
+        .filter(|r| r.enabled && r.tags.iter().any(|t| t == "auto"))
+        .collect();
+    if !auto.is_empty() {
+        return auto;
+    }
+    routes.iter().filter(|r| r.enabled).collect()
+}
+
+/// Whether a proxy error is retryable (connection-level failure or upstream 5xx).
+/// Non-retryable errors (NoRoute, NoProvider, 4xx responses) are returned immediately.
+fn is_retryable(err: &ProxyError) -> bool {
+    match err {
+        ProxyError::Upstream(msg) => {
+            let lower = msg.to_lowercase();
+            lower.contains("connection")
+                || lower.contains("timeout")
+                || lower.contains("dns")
+                || lower.contains("tls")
+                || lower.contains("reset")
+                || lower.contains("eof")
+                || lower.contains("broken pipe")
+                || lower.contains("refused")
+                || lower.contains("unreachable")
+                || lower.contains("http 500")
+                || lower.contains("http 502")
+                || lower.contains("http 503")
+                || lower.contains("http 504")
+        }
+        ProxyError::NoRoute(_) | ProxyError::NoProvider(_) => false,
+    }
+}
+
+// ---------------------------------------------------------------------------
 // Core proxy logic (protocol-aware)
 // ---------------------------------------------------------------------------
 
@@ -212,32 +263,40 @@ async fn handle_proxy(
     let tag = resolve_tag_from_model(&request_model)
         .unwrap_or_else(|| config.current_tag.clone());
 
-    // 2. Find matching route (with fallback to auto then first route)
-    let route = config
-        .routes
-        .iter()
-        .find(|r| r.tags.contains(&tag))
-        .or_else(|| {
-            log::warn!("[Proxy] no route for tag '{}', falling back to auto/default", tag);
-            config.routes.iter().find(|r| r.tags.iter().any(|t| t == "auto"))
-        })
-        .or_else(|| config.routes.first())
-        .ok_or_else(|| ProxyError::NoRoute(tag.clone()))?;
-
-    let provider_format = &route.format;
-
-    let provider = config
-        .providers
-        .get(&route.provider)
-        .ok_or_else(|| ProxyError::NoProvider(route.provider.clone()))?;
-
-    // 3. Validate provider API key
-    if provider.api_key.is_empty() || provider.api_key.starts_with("sk-your-") {
-        return Err(ProxyError::NoProvider(format!(
-            "provider '{}' has no valid API key configured",
-            route.provider
-        )));
+    // 2. Find candidate routes for failover (array order = priority)
+    let candidates = find_candidate_routes(&config.routes, &tag);
+    if candidates.is_empty() {
+        return Err(ProxyError::NoRoute(tag.clone()));
     }
+
+    let mut last_error: Option<ProxyError> = None;
+
+    for (attempt, route) in candidates.iter().enumerate() {
+        if attempt > 0 {
+            log::warn!("[Proxy] {} failover: trying route #{} (provider={}, model={})",
+                tag, attempt + 1, route.provider, route.model);
+        }
+
+        let provider_format = &route.format;
+
+        let provider = match config.providers.get(&route.provider) {
+            Some(p) => p,
+            None => {
+                let err = ProxyError::NoProvider(route.provider.clone());
+                if is_retryable(&err) { last_error = Some(err); continue; }
+                return Err(err);
+            }
+        };
+
+        // 3. Validate provider API key
+        if provider.api_key.is_empty() || provider.api_key.starts_with("sk-your-") {
+            let err = ProxyError::NoProvider(format!(
+                "provider '{}' has no valid API key configured",
+                route.provider
+            ));
+            if is_retryable(&err) { last_error = Some(err); continue; }
+            return Err(err);
+        }
 
     log::info!(
         "[Proxy] {} → {} (model={}, format={:?})",
@@ -246,16 +305,6 @@ async fn handle_proxy(
         route.model,
         provider_format
     );
-
-    // Record request log
-    let log_entry = RequestLog {
-        request_model: request_model.clone(),
-        tag: tag.clone(),
-        provider: provider.name.clone(),
-        target_model: route.model.clone(),
-        timestamp: chrono_now(),
-    };
-    state.log_request(log_entry).await;
 
     // 4. Build forwarded request body based on protocol conversion
     let fwd_body = match (client_protocol, provider_format) {
@@ -351,12 +400,23 @@ async fn handle_proxy(
     req_builder = forward_client_headers(&headers, req_builder);
 
     // 7. Send
-    let resp = req_builder
+    let resp = match req_builder
         .json(&fwd_body)
         .timeout(std::time::Duration::from_secs(if is_streaming { 3600 } else { 300 }))
         .send()
         .await
-        .map_err(|e| ProxyError::Upstream(e.to_string()))?;
+    {
+        Ok(r) => r,
+        Err(e) => {
+            let err = ProxyError::Upstream(e.to_string());
+            if is_retryable(&err) {
+                log::warn!("[Proxy] connection error (retryable): {}", err);
+                last_error = Some(err);
+                continue;
+            }
+            return Err(err);
+        }
+    };
 
     let status = resp.status();
     if !status.is_success() {
@@ -374,6 +434,15 @@ async fn handle_proxy(
             status.canonical_reason().unwrap_or("?"),
             &err_body[..err_body.len().min(300)]
         );
+        // 5xx server errors → retryable, try next candidate
+        if status_code >= 500 {
+            let err = ProxyError::Upstream(format!("HTTP {}: {}",
+                status_code, &err_body[..err_body.len().min(200)]));
+            log::warn!("[Proxy] upstream 5xx (retryable): {}", err);
+            last_error = Some(err);
+            continue;
+        }
+        // 4xx client errors → non-retryable, return immediately
         let axum_status =
             StatusCode::from_u16(status_code).unwrap_or(StatusCode::BAD_GATEWAY);
         return Ok((
@@ -383,6 +452,15 @@ async fn handle_proxy(
         )
             .into_response());
     }
+
+    // Record successful request log
+    state.log_request(RequestLog {
+        request_model: request_model.clone(),
+        tag: tag.clone(),
+        provider: provider.name.clone(),
+        target_model: route.model.clone(),
+        timestamp: chrono_now(),
+    }).await;
 
     // 8. Convert response if needed
     if is_streaming {
@@ -398,7 +476,7 @@ async fn handle_proxy(
                 );
                 let body = Body::from_stream(converted);
 
-                Ok(Response::builder()
+                return Ok(Response::builder()
                     .status(StatusCode::OK)
                     .header("content-type", "text/event-stream")
                     .header("cache-control", "no-cache")
@@ -416,7 +494,7 @@ async fn handle_proxy(
                 );
                 let body = Body::from_stream(converted);
 
-                Ok(Response::builder()
+                return Ok(Response::builder()
                     .status(StatusCode::OK)
                     .header("content-type", "text/event-stream")
                     .header("cache-control", "no-cache")
@@ -434,7 +512,7 @@ async fn handle_proxy(
                 );
                 let body = Body::from_stream(converted);
 
-                Ok(Response::builder()
+                return Ok(Response::builder()
                     .status(StatusCode::OK)
                     .header("content-type", "text/event-stream")
                     .header("cache-control", "no-cache")
@@ -452,7 +530,7 @@ async fn handle_proxy(
                 );
                 let body = Body::from_stream(converted);
 
-                Ok(Response::builder()
+                return Ok(Response::builder()
                     .status(StatusCode::OK)
                     .header("content-type", "text/event-stream")
                     .header("cache-control", "no-cache")
@@ -470,7 +548,7 @@ async fn handle_proxy(
                 );
                 let body = Body::from_stream(converted);
 
-                Ok(Response::builder()
+                return Ok(Response::builder()
                     .status(StatusCode::OK)
                     .header("content-type", "text/event-stream")
                     .header("cache-control", "no-cache")
@@ -488,7 +566,7 @@ async fn handle_proxy(
                 );
                 let body = Body::from_stream(converted);
 
-                Ok(Response::builder()
+                return Ok(Response::builder()
                     .status(StatusCode::OK)
                     .header("content-type", "text/event-stream")
                     .header("cache-control", "no-cache")
@@ -504,7 +582,7 @@ async fn handle_proxy(
                 });
                 let body = Body::from_stream(stream);
 
-                Ok(Response::builder()
+                return Ok(Response::builder()
                     .status(StatusCode::OK)
                     .header("content-type", "text/event-stream")
                     .header("cache-control", "no-cache")
@@ -519,7 +597,7 @@ async fn handle_proxy(
                 let converted = replace_model_in_anthropic_stream(Box::pin(stream), request_model);
                 let body = Body::from_stream(converted);
 
-                Ok(Response::builder()
+                return Ok(Response::builder()
                     .status(StatusCode::OK)
                     .header("content-type", "text/event-stream")
                     .header("cache-control", "no-cache")
@@ -530,10 +608,18 @@ async fn handle_proxy(
     } else {
         // Non-streaming
         let status_code = StatusCode::from_u16(status.as_u16()).unwrap_or(StatusCode::OK);
-        let resp_body = resp
-            .bytes()
-            .await
-            .map_err(|e| ProxyError::Upstream(e.to_string()))?;
+        let resp_body = match resp.bytes().await {
+            Ok(b) => b,
+            Err(e) => {
+                let err = ProxyError::Upstream(e.to_string());
+                if is_retryable(&err) {
+                    log::warn!("[Proxy] response body read error (retryable): {}", err);
+                    last_error = Some(err);
+                    continue;
+                }
+                return Err(err);
+            }
+        };
 
         match (client_protocol, provider_format) {
             ("anthropic", ProviderFormat::Openai) => {
@@ -541,7 +627,7 @@ async fn handle_proxy(
                 let openai_resp: Value = parse_upstream_json(&resp_body)?;
                 let anthropic_resp = convert::openai_to_anthropic_response(&openai_resp, &request_model);
                 let anthropic_bytes = serde_json::to_vec(&anthropic_resp).unwrap_or(resp_body.to_vec());
-                Ok((
+                return Ok((
                     status_code,
                     [("content-type", "application/json")],
                     anthropic_bytes,
@@ -553,7 +639,7 @@ async fn handle_proxy(
                 let responses_resp: Value = parse_upstream_json(&resp_body)?;
                 let anthropic_resp = convert::responses_to_anthropic_response(&responses_resp, &request_model);
                 let anthropic_bytes = serde_json::to_vec(&anthropic_resp).unwrap_or(resp_body.to_vec());
-                Ok((
+                return Ok((
                     status_code,
                     [("content-type", "application/json")],
                     anthropic_bytes,
@@ -565,7 +651,7 @@ async fn handle_proxy(
                 let responses_resp: Value = parse_upstream_json(&resp_body)?;
                 let openai_resp = convert::responses_to_openai_response(&responses_resp, &request_model);
                 let openai_bytes = serde_json::to_vec(&openai_resp).unwrap_or(resp_body.to_vec());
-                Ok((
+                return Ok((
                     status_code,
                     [("content-type", "application/json")],
                     openai_bytes,
@@ -577,7 +663,7 @@ async fn handle_proxy(
                 let anthropic_resp: Value = parse_upstream_json(&resp_body)?;
                 let openai_resp = convert::anthropic_to_openai_response(&anthropic_resp, &request_model);
                 let openai_bytes = serde_json::to_vec(&openai_resp).unwrap_or(resp_body.to_vec());
-                Ok((
+                return Ok((
                     status_code,
                     [("content-type", "application/json")],
                     openai_bytes,
@@ -589,7 +675,7 @@ async fn handle_proxy(
                 let chat_resp: Value = parse_upstream_json(&resp_body)?;
                 let responses_resp = convert::chat_to_responses_response(&chat_resp, &request_model);
                 let bytes = serde_json::to_vec(&responses_resp).unwrap_or(resp_body.to_vec());
-                Ok((
+                return Ok((
                     status_code,
                     [("content-type", "application/json")],
                     bytes,
@@ -601,7 +687,7 @@ async fn handle_proxy(
                 let anthropic_resp: Value = parse_upstream_json(&resp_body)?;
                 let responses_resp = convert::anthropic_to_responses_response(&anthropic_resp, &request_model);
                 let bytes = serde_json::to_vec(&responses_resp).unwrap_or(resp_body.to_vec());
-                Ok((
+                return Ok((
                     status_code,
                     [("content-type", "application/json")],
                     bytes,
@@ -621,7 +707,7 @@ async fn handle_proxy(
 
                 let resp_bytes = serde_json::to_vec(&resp_value).unwrap_or(resp_body.to_vec());
 
-                Ok((
+                return Ok((
                     status_code,
                     [("content-type", "application/json")],
                     resp_bytes,
@@ -630,6 +716,9 @@ async fn handle_proxy(
             }
         }
     }
+    } // end of for loop over candidates
+
+    Err(last_error.unwrap_or_else(|| ProxyError::NoRoute(tag.clone())))
 }
 
 // ---------------------------------------------------------------------------
@@ -655,27 +744,35 @@ async fn handle_count_tokens(
     let tag = resolve_tag_from_model(&request_model)
         .unwrap_or_else(|| config.current_tag.clone());
 
-    let route = config
-        .routes
-        .iter()
-        .find(|r| r.tags.contains(&tag))
-        .or_else(|| {
-            log::warn!("[Proxy] no route for tag '{}', falling back to auto/default", tag);
-            config.routes.iter().find(|r| r.tags.iter().any(|t| t == "auto"))
-        })
-        .or_else(|| config.routes.first())
-        .ok_or_else(|| ProxyError::NoRoute(tag.clone()))?;
+    let candidates = find_candidate_routes(&config.routes, &tag);
+    if candidates.is_empty() {
+        return Err(ProxyError::NoRoute(tag.clone()));
+    }
 
-    let provider = config
-        .providers
-        .get(&route.provider)
-        .ok_or_else(|| ProxyError::NoProvider(route.provider.clone()))?;
+    let mut last_error: Option<ProxyError> = None;
+
+    for (attempt, route) in candidates.iter().enumerate() {
+        if attempt > 0 {
+            log::warn!("[Proxy] count_tokens {} failover: trying route #{} (provider={}, model={})",
+                tag, attempt + 1, route.provider, route.model);
+        }
+
+        let provider = match config.providers.get(&route.provider) {
+            Some(p) => p,
+            None => {
+                let err = ProxyError::NoProvider(route.provider.clone());
+                if is_retryable(&err) { last_error = Some(err); continue; }
+                return Err(err);
+            }
+        };
 
     if provider.api_key.is_empty() || provider.api_key.starts_with("sk-your-") {
-        return Err(ProxyError::NoProvider(format!(
+        let err = ProxyError::NoProvider(format!(
             "provider '{}' has no valid API key configured",
             route.provider
-        )));
+        ));
+        if is_retryable(&err) { last_error = Some(err); continue; }
+        return Err(err);
     }
 
     log::info!(
@@ -728,19 +825,38 @@ async fn handle_count_tokens(
 
     req_builder = forward_client_headers(&headers, req_builder);
 
-    let resp = req_builder
+    let resp = match req_builder
         .json(&fwd_body)
         .timeout(std::time::Duration::from_secs(60))
         .send()
         .await
-        .map_err(|e| ProxyError::Upstream(e.to_string()))?;
+    {
+        Ok(r) => r,
+        Err(e) => {
+            let err = ProxyError::Upstream(e.to_string());
+            if is_retryable(&err) {
+                log::warn!("[Proxy] count_tokens connection error (retryable): {}", err);
+                last_error = Some(err);
+                continue;
+            }
+            return Err(err);
+        }
+    };
 
     let status = resp.status();
     let status_code = StatusCode::from_u16(status.as_u16()).unwrap_or(StatusCode::OK);
-    let resp_body = resp
-        .bytes()
-        .await
-        .map_err(|e| ProxyError::Upstream(e.to_string()))?;
+    let resp_body = match resp.bytes().await {
+        Ok(b) => b,
+        Err(e) => {
+            let err = ProxyError::Upstream(e.to_string());
+            if is_retryable(&err) {
+                log::warn!("[Proxy] count_tokens body read error (retryable): {}", err);
+                last_error = Some(err);
+                continue;
+            }
+            return Err(err);
+        }
+    };
 
     if !status.is_success() {
         let body_str = String::from_utf8_lossy(&resp_body);
@@ -752,12 +868,15 @@ async fn handle_count_tokens(
         );
     }
 
-    Ok((
+    return Ok((
         status_code,
         [("content-type", "application/json")],
         resp_body.to_vec(),
     )
         .into_response())
+    } // end of for loop over candidates
+
+    Err(last_error.unwrap_or_else(|| ProxyError::NoRoute(tag.clone())))
 }
 
 // ---------------------------------------------------------------------------
@@ -968,27 +1087,33 @@ pub async fn test_route(
 ) -> TestResult {
     let config = state.config.read().await;
 
-    // Find route by tag
-    let route = match config.routes.iter().find(|r| r.tags.contains(&tag.to_string())) {
-        Some(r) => r,
-        None => {
-            return TestResult {
-                success: false,
-                tag: tag.to_string(),
-                provider: String::new(),
-                model: String::new(),
-                format: String::new(),
-                latency_ms: 0,
-                error: Some(format!("no route found for tag '{}'", tag)),
-                response: None,
-            }
+    // Find candidate routes (same logic as proxy: enabled, priority order)
+    let candidates = find_candidate_routes(&config.routes, tag);
+    if candidates.is_empty() {
+        return TestResult {
+            success: false,
+            tag: tag.to_string(),
+            provider: String::new(),
+            model: String::new(),
+            format: String::new(),
+            latency_ms: 0,
+            error: Some(format!("no enabled route found for tag '{}'", tag)),
+            response: None,
+        };
+    }
+
+    let mut last_result: Option<TestResult> = None;
+
+    for (attempt, route) in candidates.iter().enumerate() {
+        if attempt > 0 {
+            log::warn!("[Test] {} failover: trying route #{} (provider={}, model={})",
+                tag, attempt + 1, route.provider, route.model);
         }
-    };
 
     let provider = match config.providers.get(&route.provider) {
         Some(p) => p,
         None => {
-            return TestResult {
+            let result = TestResult {
                 success: false,
                 tag: tag.to_string(),
                 provider: String::new(),
@@ -997,13 +1122,15 @@ pub async fn test_route(
                 latency_ms: 0,
                 error: Some(format!("provider '{}' not found", route.provider)),
                 response: None,
-            }
+            };
+            last_result = Some(result);
+            continue;
         }
     };
 
     // Validate API key
     if provider.api_key.is_empty() || provider.api_key.starts_with("sk-your-") {
-        return TestResult {
+        let result = TestResult {
             success: false,
             tag: tag.to_string(),
             provider: provider.name.clone(),
@@ -1017,6 +1144,8 @@ pub async fn test_route(
             )),
             response: None,
         };
+        last_result = Some(result);
+        continue;
     }
 
     // Construct a minimal Anthropic Messages request
@@ -1081,7 +1210,7 @@ pub async fn test_route(
     {
         Ok(r) => r,
         Err(e) => {
-            return TestResult {
+            let result = TestResult {
                 success: false,
                 tag: tag.to_string(),
                 provider: provider.name.clone(),
@@ -1090,7 +1219,9 @@ pub async fn test_route(
                 latency_ms: start.elapsed().as_millis() as u64,
                 error: Some(format!("connection error: {}", e)),
                 response: None,
-            }
+            };
+            last_result = Some(result);
+            continue;
         }
     };
 
@@ -1099,7 +1230,7 @@ pub async fn test_route(
     let resp_text = match resp.text().await {
         Ok(t) => t,
         Err(e) => {
-            return TestResult {
+            let result = TestResult {
                 success: false,
                 tag: tag.to_string(),
                 provider: provider.name.clone(),
@@ -1108,13 +1239,31 @@ pub async fn test_route(
                 latency_ms,
                 error: Some(format!("read response error: {}", e)),
                 response: None,
-            }
+            };
+            last_result = Some(result);
+            continue;
         }
     };
 
     if !status.is_success() {
         let err_preview = &resp_text[..resp_text.len().min(500)];
         log::warn!("[Test] <<< HTTP {}: {}", status, err_preview);
+        // 5xx → retryable, continue to next candidate
+        if status.as_u16() >= 500 {
+            let result = TestResult {
+                success: false,
+                tag: tag.to_string(),
+                provider: provider.name.clone(),
+                model: route.model.clone(),
+                format: format!("{:?}", route.format),
+                latency_ms,
+                error: Some(format!("HTTP {}: {}", status, err_preview)),
+                response: None,
+            };
+            last_result = Some(result);
+            continue;
+        }
+        // 4xx → non-retryable, return immediately
         return TestResult {
             success: false,
             tag: tag.to_string(),
@@ -1146,7 +1295,7 @@ pub async fn test_route(
 
     log::info!("[Test] ✓ success in {}ms", latency_ms);
 
-    TestResult {
+    return TestResult {
         success: true,
         tag: tag.to_string(),
         provider: provider.name.clone(),
@@ -1155,7 +1304,20 @@ pub async fn test_route(
         latency_ms,
         error: None,
         response: Some(response),
-    }
+    };
+    } // end of for loop over candidates
+
+    // All candidates failed — return last error
+    last_result.unwrap_or_else(|| TestResult {
+        success: false,
+        tag: tag.to_string(),
+        provider: String::new(),
+        model: String::new(),
+        format: String::new(),
+        latency_ms: 0,
+        error: Some(format!("all routes failed for tag '{}'", tag)),
+        response: None,
+    })
 }
 
 // ---------------------------------------------------------------------------

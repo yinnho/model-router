@@ -13,6 +13,7 @@ export interface Route {
   provider: string;
   tags: string[];
   format: 'openai' | 'anthropic' | 'openai_responses';
+  enabled: boolean;
 }
 
 export interface Tag {
