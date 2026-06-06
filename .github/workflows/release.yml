@@ -60,5 +60,5 @@ jobs:
             See [README](https://github.com/yinnho/model-router#readme) for usage instructions.
           releaseDraft: false
           prerelease: false
-          updaterJsonPreferNew: true
+          includeUpdaterJson: true
           args: ${{ matrix.args }}
