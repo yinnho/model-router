@@ -1173,60 +1173,122 @@ fn codex_responses_tool_to_chat_tool(tool: &Value) -> Option<Value> {
 
 /// Fix message ordering for strict providers (e.g., DeepSeek).
 fn codex_fix_chat_message_ordering(messages: &mut Vec<Value>) {
+    use std::collections::HashSet;
+
     let mut fixed: Vec<Value> = Vec::new();
+    let mut placed_tool_calls: HashSet<String> = HashSet::new();
+
+    // Helper: does a message have tool_calls containing a given call_id?
+    let has_matching_tool_call = |msg: &Value, cid: &str| -> bool {
+        msg.get("tool_calls").and_then(|v| v.as_array())
+            .map(|tcs| tcs.iter().any(|tc| tc.get("id").and_then(|v| v.as_str()) == Some(cid)))
+            .unwrap_or(false)
+    };
 
     for msg in messages.iter() {
         let role = msg.get("role").and_then(|v| v.as_str()).unwrap_or("");
 
-        // If previous assistant has tool_calls and current is NOT tool, fill missing results
+        // --- Handle tool messages: validate position, deduplicate, relocate ---
+        if role == "tool" {
+            if let Some(call_id) = msg.get("tool_call_id").and_then(|v| v.as_str()) {
+                // 1. Handle duplicates: replace empty fill with real data, or skip true dup
+                if placed_tool_calls.contains(call_id) {
+                    // Search for the existing entry — if it's an empty fill, replace with real data
+                    if let Some(existing) = fixed.iter_mut().find(|m| {
+                        m.get("role").and_then(|v| v.as_str()) == Some("tool")
+                            && m.get("tool_call_id").and_then(|v| v.as_str()) == Some(call_id)
+                    }) {
+                        let is_empty = existing.get("content")
+                            .map_or(true, |c| c.is_null() || c.as_str().map_or(true, |s| s.is_empty()));
+                        if is_empty {
+                            if let Some(content) = msg.get("content").cloned() {
+                                existing["content"] = content;
+                            }
+                        }
+                    }
+                    continue;
+                }
+
+                // 2. If immediately preceded by assistant with matching tool_calls → add normally
+                if let Some(prev) = fixed.last() {
+                    let prev_role = prev.get("role").and_then(|v| v.as_str()).unwrap_or("");
+                    if prev_role == "assistant" && has_matching_tool_call(prev, call_id) {
+                        placed_tool_calls.insert(call_id.to_string());
+                        fixed.push(msg.clone());
+                        continue;
+                    }
+
+                    // Also OK: preceded by another tool message whose assistant has this call_id
+                    if prev_role == "tool" {
+                        let mut found = false;
+                        for m in fixed.iter().rev() {
+                            let m_role = m.get("role").and_then(|v| v.as_str()).unwrap_or("");
+                            if m_role == "assistant" {
+                                found = has_matching_tool_call(m, call_id);
+                                break;
+                            }
+                            // Break at any boundary that's not part of the tool block
+                            if m_role != "tool" { break; }
+                        }
+                        if found {
+                            placed_tool_calls.insert(call_id.to_string());
+                            fixed.push(msg.clone());
+                            continue;
+                        }
+                    }
+                }
+
+                // 3. Tool is out of position — find matching assistant and relocate
+                let mut relocated = false;
+                for i in (0..fixed.len()).rev() {
+                    let m_role = fixed[i].get("role").and_then(|v| v.as_str()).unwrap_or("");
+                    if m_role == "assistant" {
+                        if has_matching_tool_call(&fixed[i], call_id) {
+                            // Insert right after this assistant (and any existing tool messages following it)
+                            let mut insert_pos = i + 1;
+                            while insert_pos < fixed.len() {
+                                let next_role = fixed[insert_pos].get("role").and_then(|v| v.as_str()).unwrap_or("");
+                                if next_role == "tool" { insert_pos += 1; } else { break; }
+                            }
+                            fixed.insert(insert_pos, msg.clone());
+                            placed_tool_calls.insert(call_id.to_string());
+                            relocated = true;
+                            break;
+                        }
+                    }
+                    // Break at any boundary that's not part of the tool chain
+                    if m_role != "assistant" && m_role != "tool" { break; }
+                }
+                if !relocated {
+                    continue;
+                }
+                continue;
+            }
+            // tool message without tool_call_id — keep as-is
+            fixed.push(msg.clone());
+            continue;
+        }
+
+        // --- If previous assistant has tool_calls and current is NOT tool, fill missing results ---
         if let Some(prev_msg) = fixed.last() {
             let prev_role = prev_msg.get("role").and_then(|v| v.as_str()).unwrap_or("");
             if prev_role == "assistant" {
                 if let Some(tcs) = prev_msg.get("tool_calls").and_then(|v| v.as_array()) {
-                    if !tcs.is_empty() && role != "tool" {
-                        let answered: std::collections::HashSet<String> = fixed.iter()
-                            .rev()
-                            .take_while(|m| m.get("role").and_then(|v| v.as_str()) == Some("tool"))
-                            .filter_map(|m| m.get("tool_call_id").and_then(|v| v.as_str()).map(String::from))
-                            .collect();
+                    if !tcs.is_empty() {
                         let missing: Vec<String> = tcs.iter()
                             .filter_map(|tc| tc.get("id").and_then(|v| v.as_str()).map(String::from))
-                            .filter(|id| !answered.contains(id.as_str()))
+                            .filter(|id| !placed_tool_calls.contains(id.as_str()))
                             .collect();
                         for id in &missing {
                             fixed.push(json!({"role": "tool", "tool_call_id": id, "content": ""}));
+                            placed_tool_calls.insert(id.clone());
                         }
                     }
                 }
             }
         }
 
-        // Skip orphan tool messages
-        if role == "tool" {
-            if let Some(call_id) = msg.get("tool_call_id").and_then(|v| v.as_str()) {
-                let mut found = false;
-                for m in fixed.iter().rev() {
-                    let m_role = m.get("role").and_then(|v| v.as_str()).unwrap_or("");
-                    if m_role == "assistant" {
-                        if m.get("tool_calls").and_then(|v| v.as_array())
-                            .map(|tcs| tcs.iter().any(|tc| tc.get("id").and_then(|v| v.as_str()) == Some(call_id)))
-                            .unwrap_or(false)
-                        {
-                            found = true;
-                            break;
-                        }
-                    }
-                    if m_role == "user" || m_role == "system" {
-                        break;
-                    }
-                }
-                if !found {
-                    continue;
-                }
-            }
-        }
-
-        // Skip consecutive empty assistant messages
+        // --- Skip consecutive empty assistant messages ---
         if role == "assistant" {
             if let Some(prev_msg) = fixed.last() {
                 let prev_role = prev_msg.get("role").and_then(|v| v.as_str()).unwrap_or("");
@@ -1261,7 +1323,9 @@ fn codex_fix_chat_message_ordering(messages: &mut Vec<Value>) {
             .map(|tcs| tcs.iter().filter_map(|tc| tc.get("id").and_then(|v| v.as_str()).map(String::from)).collect())
             .unwrap_or_default();
         for id in tool_call_ids {
-            fixed.push(json!({"role": "tool", "tool_call_id": id, "content": ""}));
+            if !placed_tool_calls.contains(&id) {
+                fixed.push(json!({"role": "tool", "tool_call_id": id, "content": ""}));
+            }
         }
     }
 
