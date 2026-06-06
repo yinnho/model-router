@@ -45,7 +45,9 @@ struct StreamState {
     block_index: u32,
     thinking_block_open: bool,
     text_block_open: bool,
-    tool_blocks_open: Vec<bool>,
+    /// Each slot holds the assigned Anthropic content_block index while that
+    /// tool block is open, or `None` when the slot is free.
+    tool_block_indices: Vec<Option<u32>>,
     msg_id: String,
     model: String,
     usage_input_tokens: u64,
@@ -63,7 +65,7 @@ pub fn convert_openai_stream_to_anthropic(
         block_index: 0,
         thinking_block_open: false,
         text_block_open: false,
-        tool_blocks_open: Vec::new(),
+        tool_block_indices: Vec::new(),
         msg_id: format!("msg_{:x}", std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .unwrap_or_default()
@@ -123,10 +125,11 @@ pub fn convert_openai_stream_to_anthropic(
                         st.text_block_open = false;
                         st.block_index += 1;
                     }
-                    let tool_count = st.tool_blocks_open.len();
+                    let tool_count = st.tool_block_indices.len();
                     for i in 0..tool_count {
-                        if st.tool_blocks_open[i] {
-                            yield Ok(Bytes::from(format!("event: content_block_stop\ndata: {{\"type\":\"content_block_stop\",\"index\":{}}}\n\n", st.block_index)));
+                        if let Some(idx) = st.tool_block_indices[i] {
+                            yield Ok(Bytes::from(format!("event: content_block_stop\ndata: {{\"type\":\"content_block_stop\",\"index\":{}}}\n\n", idx)));
+                            st.tool_block_indices[i] = None;
                             st.block_index += 1;
                         }
                     }
@@ -237,10 +240,10 @@ pub fn convert_openai_stream_to_anthropic(
                             if !content.is_empty() {
                                 if !st.text_block_open {
                                     // Close any open tool blocks before opening text block
-                                    for i in 0..st.tool_blocks_open.len() {
-                                        if st.tool_blocks_open[i] {
-                                            yield Ok(Bytes::from(format!("event: content_block_stop\ndata: {{\"type\":\"content_block_stop\",\"index\":{}}}\n\n", st.block_index)));
-                                            st.tool_blocks_open[i] = false;
+                                    for i in 0..st.tool_block_indices.len() {
+                                        if let Some(idx) = st.tool_block_indices[i] {
+                                            yield Ok(Bytes::from(format!("event: content_block_stop\ndata: {{\"type\":\"content_block_stop\",\"index\":{}}}\n\n", idx)));
+                                            st.tool_block_indices[i] = None;
                                             st.block_index += 1;
                                         }
                                     }
@@ -269,7 +272,7 @@ pub fn convert_openai_stream_to_anthropic(
                                 let tc_index = tc.get("index").and_then(|i| i.as_u64()).unwrap_or(0) as usize;
 
                                 // Ensure we have enough slots
-                                while st.tool_blocks_open.len() <= tc_index {
+                                while st.tool_block_indices.len() <= tc_index {
                                     // Close thinking block if open
                                     if st.thinking_block_open {
                                         yield Ok(Bytes::from(format!("event: content_block_stop\ndata: {{\"type\":\"content_block_stop\",\"index\":{}}}\n\n", st.block_index)));
@@ -282,11 +285,11 @@ pub fn convert_openai_stream_to_anthropic(
                                         st.text_block_open = false;
                                         st.block_index += 1;
                                     }
-                                    st.tool_blocks_open.push(false);
+                                    st.tool_block_indices.push(None);
                                 }
 
                                 // Open tool block if not yet open
-                                if !st.tool_blocks_open[tc_index] {
+                                if st.tool_block_indices[tc_index].is_none() {
                                     // Close thinking block first if open
                                     if st.thinking_block_open {
                                         yield Ok(Bytes::from(format!("event: content_block_stop\ndata: {{\"type\":\"content_block_stop\",\"index\":{}}}\n\n", st.block_index)));
@@ -315,15 +318,17 @@ pub fn convert_openai_stream_to_anthropic(
                                         }
                                     });
                                     yield Ok(Bytes::from(format!("event: content_block_start\ndata: {}\n\n", tool_start)));
-                                    st.tool_blocks_open[tc_index] = true;
+                                    st.tool_block_indices[tc_index] = Some(st.block_index);
+                                    st.block_index += 1;
                                 }
 
                                 // Tool arguments delta
                                 if let Some(args) = tc.get("function").and_then(|f| f.get("arguments")).and_then(|a| a.as_str()) {
                                     if !args.is_empty() {
+                                        let tool_idx = st.tool_block_indices[tc_index].unwrap_or(st.block_index);
                                         let args_delta = json!({
                                             "type": "content_block_delta",
-                                            "index": st.block_index,
+                                            "index": tool_idx,
                                             "delta": {
                                                 "type": "input_json_delta",
                                                 "partial_json": args
@@ -358,12 +363,12 @@ pub fn convert_openai_stream_to_anthropic(
                                     st.text_block_open = false;
                                     st.block_index += 1;
                                 }
-                                let tool_count = st.tool_blocks_open.len();
+                                let tool_count = st.tool_block_indices.len();
                                 let mut has_open_tool = false;
                                 for i in 0..tool_count {
-                                    if st.tool_blocks_open[i] {
-                                        yield Ok(Bytes::from(format!("event: content_block_stop\ndata: {{\"type\":\"content_block_stop\",\"index\":{}}}\n\n", st.block_index)));
-                                        st.tool_blocks_open[i] = false;
+                                    if let Some(idx) = st.tool_block_indices[i] {
+                                        yield Ok(Bytes::from(format!("event: content_block_stop\ndata: {{\"type\":\"content_block_stop\",\"index\":{}}}\n\n", idx)));
+                                        st.tool_block_indices[i] = None;
                                         has_open_tool = true;
                                         st.block_index += 1;
                                     }
@@ -2104,5 +2109,131 @@ impl CodexAnthropicToResponsesState {
             "id": self.response_id, "object": "response", "status": "failed",
             "error": {"message": message}
         }))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use futures::stream;
+    use futures::StreamExt;
+
+    fn sse_chunk(s: &str) -> Result<Bytes, std::io::Error> {
+        Ok(Bytes::from(s.to_string()))
+    }
+
+    async fn collect_anthropic_events(
+        input: Vec<Result<Bytes, std::io::Error>>,
+    ) -> Vec<String> {
+        let upstream = Box::pin(stream::iter(input));
+        let converted = convert_openai_stream_to_anthropic(upstream, "test-model".into());
+        let collected: Vec<_> = converted.collect().await;
+        let mut lines = Vec::new();
+        for result in collected {
+            let data = result.unwrap();
+            lines.push(String::from_utf8_lossy(&data).to_string());
+        }
+        lines
+    }
+
+    // Helper that correctly parses multi-line SSE events.
+    fn parse_sse_events(lines: &[String]) -> Vec<(String, Value)> {
+        let mut events = Vec::new();
+        for raw in lines {
+            let mut event_name = String::new();
+            let mut data_str = String::new();
+            for line in raw.split_inclusive('\n') {
+                let trimmed = line.trim();
+                if let Some(ev) = trimmed.strip_prefix("event: ") {
+                    event_name = ev.trim().to_string();
+                } else if let Some(d) = trimmed.strip_prefix("data: ") {
+                    data_str = d.trim().to_string();
+                } else if let Some(d) = trimmed.strip_prefix("data:") {
+                    data_str = d.trim().to_string();
+                }
+            }
+            if !data_str.is_empty() {
+                if let Ok(v) = serde_json::from_str::<Value>(&data_str) {
+                    events.push((event_name, v));
+                }
+            }
+        }
+        events
+    }
+
+    #[tokio::test]
+    async fn test_single_tool_block_has_correct_index() {
+        let input = vec![
+            sse_chunk("data: {\"choices\":[{\"delta\":{\"content\":\"ok\"}}]}\n\n"),
+            sse_chunk("data: {\"choices\":[{\"delta\":{\"tool_calls\":[{\"index\":0,\"id\":\"c1\",\"function\":{\"name\":\"bash\",\"arguments\":\"{}\"}}]}}]}\n\n"),
+            sse_chunk("data: [DONE]\n\n"),
+        ];
+        let lines = collect_anthropic_events(input).await;
+        let events = parse_sse_events(&lines);
+        let idxs: Vec<u32> = events.iter()
+            .filter_map(|(_, v)| v.get("index").and_then(|i| i.as_u64()).map(|n| n as u32))
+            .collect();
+        assert!(idxs.contains(&0), "text at 0, got idxs: {:?}\nEvents: {:?}", idxs, events.iter().map(|(e,_)| e).collect::<Vec<_>>());
+        assert!(idxs.contains(&1), "tool at 1, got: {:?}", idxs);
+    }
+
+    #[tokio::test]
+    async fn test_two_tools_in_same_delta_get_different_indices() {
+        // THE critical regression test: two tool calls in one delta
+        let input = vec![
+            sse_chunk("data: {\"choices\":[{\"delta\":{\"tool_calls\":[\
+                {\"index\":0,\"id\":\"bash1\",\"function\":{\"name\":\"bash\",\"arguments\":\"{}\"}},\
+                {\"index\":1,\"id\":\"read1\",\"function\":{\"name\":\"read\",\"arguments\":\"{}\"}}\
+            ]}}]}\n\n"),
+            sse_chunk("data: [DONE]\n\n"),
+        ];
+        let lines = collect_anthropic_events(input).await;
+        let events = parse_sse_events(&lines);
+
+        let starts: Vec<(u32, String)> = events.iter().filter_map(|(ev, v)| {
+            if ev != "content_block_start" { return None; }
+            let idx = v.get("index").and_then(|i| i.as_u64())? as u32;
+            let name = v.get("content_block").and_then(|c| c.get("name")).and_then(|n| n.as_str()).unwrap_or("").to_string();
+            Some((idx, name))
+        }).collect();
+
+        let bash_idx = starts.iter().find(|(_, n)| n == "bash").map(|(i, _)| *i);
+        let read_idx = starts.iter().find(|(_, n)| n == "read").map(|(i, _)| *i);
+
+        assert!(bash_idx.is_some(), "no bash tool block. starts: {:?}\nEvents: {:?}", starts, events);
+        assert!(read_idx.is_some(), "no read tool block. starts: {:?}\nEvents: {:?}", starts, events);
+        assert_ne!(bash_idx, read_idx,
+            "BUG: two tool calls in same delta share index {}. Events:\n{:?}",
+            bash_idx.unwrap(), events
+        );
+    }
+
+    #[tokio::test]
+    async fn test_all_content_block_starts_unique() {
+        let input = vec![
+            sse_chunk("data: {\"choices\":[{\"delta\":{\"content\":\"text1\"}}]}\n\n"),
+            sse_chunk("data: {\"choices\":[{\"delta\":{\"tool_calls\":[\
+                {\"index\":0,\"id\":\"c1\",\"function\":{\"name\":\"a\",\"arguments\":\"{}\"}},\
+                {\"index\":1,\"id\":\"c2\",\"function\":{\"name\":\"b\",\"arguments\":\"{}\"}},\
+                {\"index\":2,\"id\":\"c3\",\"function\":{\"name\":\"c\",\"arguments\":\"{}\"}}\
+            ]}}]}\n\n"),
+            sse_chunk("data: [DONE]\n\n"),
+        ];
+        let lines = collect_anthropic_events(input).await;
+        let events = parse_sse_events(&lines);
+        let starts: Vec<u32> = events.iter()
+            .filter(|(ev, _)| ev == "content_block_start")
+            .filter_map(|(_, v)| v.get("index").and_then(|i| i.as_u64()).map(|n| n as u32))
+            .collect();
+        let mut seen = std::collections::HashSet::new();
+        for s in &starts {
+            assert!(seen.insert(s),
+                "duplicate content_block_start index {} in {:?}\nEvents:\n{:?}",
+                s, starts, events
+            );
+        }
+        // Text + 3 tools = 4 unique blocks
+        assert_eq!(starts.len(), 4, "expected 4 content blocks, got {}: {:?}\nEvents:\n{:?}",
+            starts.len(), starts, events);
     }
 }
