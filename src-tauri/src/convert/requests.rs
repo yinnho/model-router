@@ -114,6 +114,10 @@ pub fn anthropic_to_openai_request(body: &Value, target_model: &str) -> Value {
                     // Convert thinking blocks → reasoning_content
                     if !reasoning_parts.is_empty() {
                         openai_msg["reasoning_content"] = Value::String(reasoning_parts.join(""));
+                    } else if !tool_calls.is_empty() && body.get("thinking").and_then(|t| t.get("type")).and_then(|v| v.as_str()) == Some("enabled") {
+                        // When thinking is enabled, some providers (e.g. GLM) require reasoning_content
+                        // on all assistant messages including tool-call-only ones.
+                        openai_msg["reasoning_content"] = Value::String(" ".to_string());
                     }
 
                     if !tool_calls.is_empty() {
