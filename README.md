@@ -14,9 +14,9 @@ Model Router 是一个轻量级桌面应用，置于 AI 客户端（如 Claude C
 
 | 客户端格式 | Provider 格式 | 典型场景 |
 |-----------|-------------|---------|
-| Anthropic Messages | OpenAI Chat Completions | DeepSeek、Moonshot (Kimi)、SiliconFlow |
+| Anthropic Messages | OpenAI Chat Completions | DeepSeek、SiliconFlow |
 | Anthropic Messages | OpenAI Responses API | 通义千问 DashScope |
-| Anthropic Messages | Anthropic（透传） | 百度文心、智谱 GLM |
+| Anthropic Messages | Anthropic（透传） | 百度文心、智谱 GLM、Moonshot Kimi |
 | OpenAI Chat Completions | OpenAI Responses API | Codex CLI |
 | OpenAI Responses API | OpenAI Chat Completions | Codex CLI |
 | OpenAI Responses API | Anthropic Messages | Codex CLI |

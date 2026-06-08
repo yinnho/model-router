@@ -311,10 +311,14 @@ async fn handle_proxy(
         ("anthropic", ProviderFormat::Anthropic) => {
             // Anthropic → Anthropic: passthrough with fixes
             // Note: don't strip_thinking here — Anthropic-compatible providers
-            // like Zhipu support thinking blocks
+            // like Zhipu support thinking blocks.
+            // Also inject reasoning_content on assistant messages that have thinking
+            // blocks, because some "Anthropic-compatible" providers (e.g. KIMI)
+            // check for reasoning_content instead of thinking blocks.
             let mut b = body.clone();
             b["model"] = Value::String(route.model.clone());
             normalize_roles(&mut b);
+            inject_reasoning_content(&mut b);
             b
         }
         ("anthropic", ProviderFormat::Openai) => {
@@ -1033,6 +1037,52 @@ fn normalize_roles(value: &mut Value) {
             }
         }
         _ => {}
+    }
+}
+
+/// Inject `reasoning_content` field on assistant messages that contain thinking blocks.
+/// Some "Anthropic-compatible" providers (e.g. KIMI) validate `reasoning_content` at the
+/// message level rather than (or in addition to) `thinking` blocks in the content array.
+fn inject_reasoning_content(value: &mut Value) {
+    let thinking_enabled = value
+        .get("thinking")
+        .and_then(|t| t.get("type"))
+        .and_then(|v| v.as_str())
+        == Some("enabled");
+
+    if let Some(messages) = value.get_mut("messages").and_then(|m| m.as_array_mut()) {
+        for msg in messages.iter_mut() {
+            if msg.get("role").and_then(|r| r.as_str()) != Some("assistant") {
+                continue;
+            }
+
+            // Extract thinking text from content blocks
+            let mut reasoning = String::new();
+            if let Some(content) = msg.get("content").and_then(|c| c.as_array()) {
+                for block in content {
+                    if block.get("type").and_then(|t| t.as_str()) == Some("thinking") {
+                        if let Some(t) = block.get("thinking").and_then(|t| t.as_str()) {
+                            reasoning.push_str(t);
+                        }
+                    }
+                }
+            }
+
+            if !reasoning.is_empty() {
+                msg.as_object_mut()
+                    .unwrap()
+                    .insert("reasoning_content".into(), Value::String(reasoning));
+            } else if thinking_enabled
+                && msg.get("content").and_then(|c| c.as_array()).map_or(false, |arr| {
+                    arr.iter().any(|b| b.get("type").and_then(|t| t.as_str()) == Some("tool_use"))
+                })
+            {
+                // Assistant message with tool calls but no thinking block — inject placeholder
+                msg.as_object_mut()
+                    .unwrap()
+                    .insert("reasoning_content".into(), Value::String(" ".into()));
+            }
+        }
     }
 }
 
