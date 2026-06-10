@@ -1040,9 +1040,9 @@ fn normalize_roles(value: &mut Value) {
     }
 }
 
-/// Inject `reasoning_content` field on assistant messages that contain thinking blocks.
-/// Some "Anthropic-compatible" providers (e.g. KIMI) validate `reasoning_content` at the
-/// message level rather than (or in addition to) `thinking` blocks in the content array.
+/// Inject placeholder `thinking` blocks into assistant messages when thinking is enabled.
+/// KIMI's API requires every assistant message to have a thinking block in the content array
+/// when thinking is enabled — even tool-call-only messages that came from earlier turns.
 fn inject_reasoning_content(value: &mut Value) {
     let thinking_enabled = value
         .get("thinking")
@@ -1050,37 +1050,33 @@ fn inject_reasoning_content(value: &mut Value) {
         .and_then(|v| v.as_str())
         == Some("enabled");
 
+    if !thinking_enabled {
+        return;
+    }
+
     if let Some(messages) = value.get_mut("messages").and_then(|m| m.as_array_mut()) {
         for msg in messages.iter_mut() {
             if msg.get("role").and_then(|r| r.as_str()) != Some("assistant") {
                 continue;
             }
 
-            // Extract thinking text from content blocks
-            let mut reasoning = String::new();
-            if let Some(content) = msg.get("content").and_then(|c| c.as_array()) {
-                for block in content {
-                    if block.get("type").and_then(|t| t.as_str()) == Some("thinking") {
-                        if let Some(t) = block.get("thinking").and_then(|t| t.as_str()) {
-                            reasoning.push_str(t);
-                        }
-                    }
-                }
+            // Check if content already has a thinking block
+            let has_thinking = msg
+                .get("content")
+                .and_then(|c| c.as_array())
+                .map(|arr| arr.iter().any(|b| b.get("type").and_then(|t| t.as_str()) == Some("thinking")))
+                .unwrap_or(false);
+
+            if has_thinking {
+                continue;
             }
 
-            if !reasoning.is_empty() {
-                msg.as_object_mut()
-                    .unwrap()
-                    .insert("reasoning_content".into(), Value::String(reasoning));
-            } else if thinking_enabled
-                && msg.get("content").and_then(|c| c.as_array()).map_or(false, |arr| {
-                    arr.iter().any(|b| b.get("type").and_then(|t| t.as_str()) == Some("tool_use"))
-                })
-            {
-                // Assistant message with tool calls but no thinking block — inject placeholder
-                msg.as_object_mut()
-                    .unwrap()
-                    .insert("reasoning_content".into(), Value::String(" ".into()));
+            // Inject a placeholder thinking block at the start of the content array
+            if let Some(content) = msg.get_mut("content").and_then(|c| c.as_array_mut()) {
+                content.insert(0, json!({
+                    "type": "thinking",
+                    "thinking": " "
+                }));
             }
         }
     }
