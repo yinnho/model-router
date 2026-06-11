@@ -310,11 +310,6 @@ async fn handle_proxy(
     let fwd_body = match (client_protocol, provider_format) {
         ("anthropic", ProviderFormat::Anthropic) => {
             // Anthropic → Anthropic: passthrough with fixes
-            // Note: don't strip_thinking here — Anthropic-compatible providers
-            // like Zhipu support thinking blocks.
-            // Also inject reasoning_content on assistant messages that have thinking
-            // blocks, because some "Anthropic-compatible" providers (e.g. KIMI)
-            // check for reasoning_content instead of thinking blocks.
             let mut b = body.clone();
             b["model"] = Value::String(route.model.clone());
             normalize_roles(&mut b);
@@ -1044,13 +1039,17 @@ fn normalize_roles(value: &mut Value) {
 /// KIMI's API requires every assistant message to have a thinking block in the content array
 /// when thinking is enabled — even tool-call-only messages that came from earlier turns.
 fn inject_reasoning_content(value: &mut Value) {
-    let thinking_enabled = value
+    // Claude Code sends thinking.type as "enabled" or "adaptive"
+    // Both require thinking blocks in all assistant messages for KIMI/文心
+    let thinking_type = value
         .get("thinking")
         .and_then(|t| t.get("type"))
         .and_then(|v| v.as_str())
-        == Some("enabled");
+        .unwrap_or("");
 
-    if !thinking_enabled {
+    let thinking_active = thinking_type == "enabled" || thinking_type == "adaptive";
+
+    if !thinking_active {
         return;
     }
 
@@ -1058,6 +1057,21 @@ fn inject_reasoning_content(value: &mut Value) {
         for msg in messages.iter_mut() {
             if msg.get("role").and_then(|r| r.as_str()) != Some("assistant") {
                 continue;
+            }
+
+            // Ensure content is an array — convert string/null to array first
+            let content_is_array = msg.get("content").map(|c| c.is_array()).unwrap_or(false);
+            if !content_is_array {
+                // Convert content to array: string → [{"type":"text","text":"..."}], null/missing → []
+                let text_content = msg
+                    .get("content")
+                    .and_then(|c| c.as_str())
+                    .unwrap_or("");
+                msg["content"] = if text_content.is_empty() {
+                    json!([])
+                } else {
+                    json!([{"type": "text", "text": text_content}])
+                };
             }
 
             // Check if content already has a thinking block
